@@ -5,8 +5,8 @@ st.set_page_config(page_title="Slitherlink — Grid", layout="wide")
 st.title("Slitherlink — Grid of dots")
 
 # User controls
-cols = st.sidebar.number_input("Columns (X)", min_value=2, max_value=40, value=7, step=1)
-rows = st.sidebar.number_input("Rows (Y)", min_value=2, max_value=40, value=7, step=1)
+cols = st.sidebar.number_input("Columns (X)", min_value=2, max_value=200, value=7, step=1)
+rows = st.sidebar.number_input("Rows (Y)", min_value=2, max_value=200, value=7, step=1)
 cell_px = st.sidebar.slider("Cell size (px)", min_value=24, max_value=120, value=56)
 
 # compute svg dimensions (viewBox coordinates)
