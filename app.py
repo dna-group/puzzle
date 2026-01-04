@@ -1,10 +1,10 @@
 # app.py
-# Streamlit app: Slitherlink with zoomed-in editing only (no minimap)
+# Streamlit app: Slitherlink — zoomed editing only, minimal UI (no HUD, no buttons, no text)
 # - Grid: 128 x 178 dots
-# - Click to toggle edge (degree ≤ 2)
-# - Click+drag pans the zoomed viewport
+# - Click to toggle an edge (degree ≤ 2)
+# - Click-and-drag on the zoomed canvas pans the viewport
 # - Dots are white on a black background
-# - Lines are white and slightly thicker
+# - Edges drawn in solid white, slightly thicker
 #
 # Usage:
 #   pip install streamlit
@@ -14,8 +14,7 @@ import streamlit as st
 from streamlit.components.v1 import html
 
 st.set_page_config(layout="wide")
-
-st.markdown("## Slitherlink — Zoomed Editing (no minimap)")
+# No visible title/instructions as requested
 
 html_code = r"""
 <!doctype html>
@@ -27,21 +26,13 @@ html_code = r"""
 <style>
   html,body { height:100%; margin:0; font-family: Arial, sans-serif; background:#000; color:#fff; }
   #container { position:relative; height:80vh; width:100%; background:#000; overflow:hidden; }
-  canvas { display:block; width:100%; height:100%; }
-  #mainCanvas { background: #000; touch-action: none; }
-  #hud { position:absolute; left:12px; top:12px; background:rgba(0,0,0,0.6); color:#fff; padding:6px 8px; border-radius:6px; border:1px solid #333; font-size:13px; z-index:5; }
-  .btn { padding:6px 8px; border-radius:4px; border:1px solid #444; background:#111; color:#fff; cursor:pointer; display:inline-block; margin-right:6px; }
+  canvas { display:block; }
+  #mainCanvas { background: #000; touch-action: none; width:100%; height:100%; }
+  /* intentionally no HUD, buttons, or text */
 </style>
 </head>
 <body>
 <div id="container">
-  <div id="hud">
-    <span class="btn" id="zoomInBtn">Zoom In</span>
-    <span class="btn" id="zoomOutBtn">Zoom Out</span>
-    <span class="btn" id="resetBtn">Reset</span>
-    <span style="margin-left:8px">Click zoom area to toggle edge. Drag to pan.</span>
-  </div>
-
   <canvas id="mainCanvas"></canvas>
 </div>
 
@@ -65,9 +56,6 @@ html_code = r"""
   const container = document.getElementById('container');
   const mainC = document.getElementById('mainCanvas');
   const mc = mainC.getContext('2d', { alpha: false });
-  const zoomInBtn = document.getElementById('zoomInBtn');
-  const zoomOutBtn = document.getElementById('zoomOutBtn');
-  const resetBtn = document.getElementById('resetBtn');
 
   // State
   let zoom = INITIAL_ZOOM;
@@ -193,9 +181,8 @@ html_code = r"""
       }
     }
 
-    // draw edges on main canvas: white and slightly thicker
-    // thickness scales with zoom but is clamped
-    mc.lineWidth = Math.max(2, Math.min(6, zoom * 1.2));
+    // draw edges on main canvas — solid white, thicker
+    mc.lineWidth = Math.max(2.5, Math.min(5, zoom*1.0)); // slightly thicker and scale with zoom
     mc.strokeStyle = '#fff';
     mc.lineCap = 'round';
     mc.beginPath();
@@ -275,7 +262,7 @@ html_code = r"""
     draw();
   }
 
-  // Zoom controls (keep viewport centre when zooming)
+  // Zoom helper (kept for potential keyboard use)
   function setZoom(newZoom){
     const oldCenter = { cx: viewport.cx, cy: viewport.cy };
     zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
@@ -285,13 +272,17 @@ html_code = r"""
     viewport.cy = Math.max(viewport.h/2, Math.min(fullHeight - viewport.h/2, oldCenter.cy));
     draw();
   }
-  zoomInBtn.addEventListener('click', ()=> setZoom(zoom * 1.4));
-  zoomOutBtn.addEventListener('click', ()=> setZoom(zoom / 1.4));
-  resetBtn.addEventListener('click', ()=> {
-    zoom = INITIAL_ZOOM;
-    viewport.cx = fullWidth/2; viewport.cy = fullHeight/2;
-    viewport.w = mainC.width / zoom; viewport.h = mainC.height / zoom;
-    draw();
+
+  // keyboard nudges & zoom with +/- keys
+  window.addEventListener('keydown', (ev) => {
+    const step = Math.max(10, 0.06 * Math.min(viewport.w, viewport.h));
+    if (ev.key === 'ArrowLeft') { viewport.cx = Math.max(viewport.w/2, viewport.cx - step); draw(); }
+    if (ev.key === 'ArrowRight'){ viewport.cx = Math.min(fullWidth - viewport.w/2, viewport.cx + step); draw(); }
+    if (ev.key === 'ArrowUp')   { viewport.cy = Math.max(viewport.h/2, viewport.cy - step); draw(); }
+    if (ev.key === 'ArrowDown') { viewport.cy = Math.min(fullHeight - viewport.h/2, viewport.cy + step); draw(); }
+    if (ev.key === '+' || ev.key === '=') setZoom(zoom * 1.2);
+    if (ev.key === '-' || ev.key === '_') setZoom(zoom / 1.2);
+    if (ev.key === '0') { zoom = INITIAL_ZOOM; viewport.cx = fullWidth/2; viewport.cy = fullHeight/2; viewport.w = mainC.width / zoom; viewport.h = mainC.height / zoom; draw(); }
   });
 
   // Resize handling
@@ -309,15 +300,6 @@ html_code = r"""
   viewport.w = mainC.width / zoom;
   viewport.h = mainC.height / zoom;
   draw();
-
-  // keyboard nudges
-  window.addEventListener('keydown', (ev) => {
-    const step = Math.max(10, 0.06 * Math.min(viewport.w, viewport.h));
-    if (ev.key === 'ArrowLeft') { viewport.cx = Math.max(viewport.w/2, viewport.cx - step); draw(); }
-    if (ev.key === 'ArrowRight'){ viewport.cx = Math.min(fullWidth - viewport.w/2, viewport.cx + step); draw(); }
-    if (ev.key === 'ArrowUp')   { viewport.cy = Math.max(viewport.h/2, viewport.cy - step); draw(); }
-    if (ev.key === 'ArrowDown') { viewport.cy = Math.min(fullHeight - viewport.h/2, viewport.cy + step); draw(); }
-  });
 
   // expose simple export for debugging
   window.slitherExport = () => {
