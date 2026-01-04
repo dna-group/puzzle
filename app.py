@@ -5,8 +5,8 @@ from streamlit.components.v1 import html
 st.set_page_config(page_title="Slitherlink Board", layout="wide")
 
 # Fixed board size: 200 x 200 dots (199 x 199 cells)
-ROWS = 199   # cells vertically
-COLS = 199   # cells horizontally
+ROWS = 199
+COLS = 199
 CELL_PX = 16
 IFRAME_HEIGHT = 1200
 
@@ -37,11 +37,10 @@ HTML = """
   // pointer state
   let pointerActive = false;
   let pointerMode = null;       // 'add' or 'remove'
-  let initialEdge = null;       // key of the first selected edge
-  let dragAxis = null;          // 'h' or 'v'
-  let lastAddedEdge = null;     // last edge acted on
-  let startClient = null;       // {x,y} initial client coords
-  let lastStep = 0;            // number of steps already applied
+  let anchorEdge = null;        // key of the anchor edge for stepping
+  let activeAxis = null;        // 'h' or 'v' - current dominant axis (can change)
+  let anchorClient = null;      // client {x,y} used as anchor for measuring steps
+  let lastStep = 0;             // steps already applied since anchorClient
   let viewBoxW = null, viewBoxH = null;
 
   function edgeKey(r,c,d){ return r + "," + c + "," + d; }
@@ -71,7 +70,7 @@ HTML = """
     return false;
   }
 
-  // build SVG and meta
+  // build SVG
   const width  = COLS * CELL + MARGIN * 2;
   const height = ROWS * CELL + MARGIN * 2;
   viewBoxW = width; viewBoxH = height;
@@ -126,7 +125,6 @@ HTML = """
     return g;
   }
 
-  // create all edges
   for(let r=0;r<=ROWS;r++){
     for(let c=0;c<COLS;c++){
       const x1 = MARGIN + c*CELL, y = MARGIN + r*CELL, x2 = x1 + CELL;
@@ -156,7 +154,6 @@ HTML = """
     return { x: fx * viewBoxW, y: fy * viewBoxH };
   }
 
-  // nearest edge calculation unchanged
   function nearestEdgeKeyForClient(clientX, clientY){
     const pt = clientToViewBox(clientX, clientY);
     const sx = pt.x, sy = pt.y;
@@ -182,90 +179,92 @@ HTML = """
     return key_v;
   }
 
-  // pointer handlers
+  // anchor adjustment when axis switches: choose anchorEdge and anchorClient based on current pointer
+  function setAnchorForCurrentPointer(clientX, clientY){
+    anchorEdge = nearestEdgeKeyForClient(clientX, clientY);
+    anchorClient = { x: clientX, y: clientY };
+    lastStep = 0;
+  }
+
   function handlePointerDown(ev){
     ev.preventDefault();
     try{ ev.target.setPointerCapture(ev.pointerId); } catch(e){}
     pointerActive = true;
-    startClient = { x: ev.clientX, y: ev.clientY };
-    lastStep = 0;
-    const chosen = nearestEdgeKeyForClient(ev.clientX, ev.clientY);
+    // set initial anchor and mode
+    setAnchorForCurrentPointer(ev.clientX, ev.clientY);
+    const chosen = anchorEdge;
     if(!chosen) return;
-    initialEdge = chosen;
-    lastAddedEdge = chosen;
     pointerMode = filled.has(chosen) ? 'remove' : 'add';
     // immediate attempt
     if(pointerMode === 'add'){
-      if(!wouldExceedDegreeIfAdded(chosen)){
-        filled.add(chosen);
-      } else {
-        flash(chosen);
-      }
+      if(!wouldExceedDegreeIfAdded(chosen)) filled.add(chosen);
+      else flashBlocked(chosen);
     } else {
       filled.delete(chosen);
     }
     updateVisuals();
-    dragAxis = null;
+    activeAxis = null; // will be set by first significant move
   }
 
   function handlePointerUp(ev){
     try{ ev.target.releasePointerCapture(ev.pointerId); } catch(e){}
     pointerActive = false;
     pointerMode = null;
-    initialEdge = null;
-    lastAddedEdge = null;
-    startClient = null;
-    dragAxis = null;
+    anchorEdge = null;
+    anchorClient = null;
+    activeAxis = null;
     lastStep = 0;
   }
 
-  // determine column or row anchor when stepping across axis different from initial edge:
-  function verticalColumnForHorizontalBase(base, startClientView){
-    // base.c .. base.c+1 are the columns; choose which column to use for verticals
+  // choose anchor index when base orientation differs from axis
+  function columnForHorizontalBase(base, anchorView){
     const midX = MARGIN + (base.c + 0.5) * CELL;
-    return (startClientView.x <= midX) ? base.c : base.c + 1;
+    return (anchorView.x <= midX) ? base.c : base.c + 1;
   }
-  function horizontalRowForVerticalBase(base, startClientView){
+  function rowForVerticalBase(base, anchorView){
     const midY = MARGIN + (base.r + 0.5) * CELL;
-    return (startClientView.y <= midY) ? base.r : base.r + 1;
+    return (anchorView.y <= midY) ? base.r : base.r + 1;
   }
 
-  // main pointermove: determine axis and apply NEW steps since lastStep
+  // pointermove: dynamically determine axis; if axis changes, re-anchor at current pointer position
   document.addEventListener("pointermove", function(ev){
-    if(!pointerActive || !startClient || !initialEdge) return;
-    const dx = ev.clientX - startClient.x;
-    const dy = ev.clientY - startClient.y;
-    if(!dragAxis){
-      if(Math.hypot(dx,dy) < 6) return;
-      dragAxis = Math.abs(dx) >= Math.abs(dy) ? 'h' : 'v';
+    if(!pointerActive || !anchorClient || !anchorEdge) return;
+    const dx = ev.clientX - anchorClient.x;
+    const dy = ev.clientY - anchorClient.y;
+
+    // choose current dominant axis based on movement from anchorClient
+    const movementThreshold = 6; // pixels
+    if(Math.hypot(dx,dy) < movementThreshold) return;
+
+    const currentAxis = Math.abs(dx) >= Math.abs(dy) ? 'h' : 'v';
+    // if axis changed, re-anchor at current pointer so stepping continues from here
+    if(activeAxis !== currentAxis){
+      activeAxis = currentAxis;
+      setAnchorForCurrentPointer(ev.clientX, ev.clientY);
+      // recompute pointerMode relative to new anchor
+      pointerMode = filled.has(anchorEdge) ? 'remove' : 'add';
+      return; // wait for next move to create steps from the fresh anchor
     }
-    // map client movement to viewBox units per axis
+
+    // compute how many steps from anchorClient to current pointer along activeAxis (in view units)
     const rect = svg.getBoundingClientRect();
     const unitX = viewBoxW / rect.width;
     const unitY = viewBoxH / rect.height;
-    let movedUnits = 0;
-    let sign = 0;
-    if(dragAxis === 'h'){
-      movedUnits = dx * unitX;
-      sign = movedUnits >= 0 ? 1 : -1;
-    } else {
-      movedUnits = dy * unitY;
-      sign = movedUnits >= 0 ? 1 : -1;
-    }
+    let movedUnits = (activeAxis === 'h') ? (ev.clientX - anchorClient.x) * unitX : (ev.clientY - anchorClient.y) * unitY;
+    const sign = movedUnits >= 0 ? 1 : -1;
     const stepsNow = Math.floor(Math.abs(movedUnits) / CELL);
-    if(stepsNow <= lastStep) return; // nothing new
+    if(stepsNow <= lastStep) return;
     const newSteps = stepsNow - lastStep;
-    // base parse
-    const base = parseKey(initialEdge);
-    // precompute startClient in view coords for anchor selection
-    const startView = clientToViewBox(startClient.x, startClient.y);
+    lastStep = stepsNow;
+
+    const base = parseKey(anchorEdge);
+    const anchorView = clientToViewBox(anchorClient.x, anchorClient.y);
 
     for(let s=1; s<=newSteps; s++){
       let keyToAct = null;
-      const stepIndex = lastStep + s; // distance in cells from initial
-      if(base.d === dragAxis){
-        // same orientation: straightforward
-        if(dragAxis === 'h'){
+      const stepIndex = (lastStep - newSteps) + s; // steps from anchor (this recomputes safely)
+      if(base.d === activeAxis){
+        if(activeAxis === 'h'){
           const newC = base.c + sign * stepIndex;
           const newR = base.r;
           if(newC < 0 || newC >= COLS) break;
@@ -277,17 +276,15 @@ HTML = """
           keyToAct = edgeKey(newR, newC, 'v');
         }
       } else {
-        // different orientation: map across to nearest adjacent index based on initial pointer position
-        if(base.d === 'h' && dragAxis === 'v'){
-          // started on horizontal edge; choose column (base.c or base.c+1) based on start x
-          const col = verticalColumnForHorizontalBase(base, startView);
+        // different orientation: map intelligently using anchorView
+        if(base.d === 'h' && activeAxis === 'v'){
+          const col = columnForHorizontalBase(base, anchorView);
           const newR = base.r + sign * stepIndex;
           if(newR < 0 || newR >= ROWS) break;
           if(col < 0 || col > COLS) break;
           keyToAct = edgeKey(newR, col, 'v');
-        } else if(base.d === 'v' && dragAxis === 'h'){
-          // started vertical; choose row (base.r or base.r+1) based on start y
-          const row = horizontalRowForVerticalBase(base, startView);
+        } else if(base.d === 'v' && activeAxis === 'h'){
+          const row = rowForVerticalBase(base, anchorView);
           const newC = base.c + sign * stepIndex;
           if(newC < 0 || newC >= COLS) break;
           if(row < 0 || row > ROWS) break;
@@ -296,37 +293,34 @@ HTML = """
       }
 
       if(!keyToAct) continue;
-      // perform action respecting degree constraints
+
       if(pointerMode === 'add'){
         if(!filled.has(keyToAct)){
           if(!wouldExceedDegreeIfAdded(keyToAct)){
             filled.add(keyToAct);
-            lastAddedEdge = keyToAct;
           } else {
-            flash(keyToAct);
+            flashBlocked(keyToAct);
           }
         }
       } else if(pointerMode === 'remove'){
         if(filled.has(keyToAct)){
           filled.delete(keyToAct);
-          lastAddedEdge = keyToAct;
         }
       }
     }
 
-    lastStep = stepsNow;
     updateVisuals();
   }, {passive:true});
 
-  function flash(key){
+  function flashBlocked(key){
     const g = svg.querySelector(`[data-edge="${key}"]`);
     if(!g) return;
     const vis = g.querySelector('.vis');
     vis.setAttribute('stroke','#d00');
-    setTimeout(()=>{ vis.setAttribute('stroke', filled.has(key) ? '#000' : 'transparent'); }, 180);
+    setTimeout(()=>{ vis.setAttribute('stroke', filled.has(key) ? '#000' : 'transparent'); }, 200);
   }
 
-  // double-tap & pinch unchanged
+  // double-tap zoom and pinch-to-zoom
   let lastTap = 0;
   document.addEventListener("touchend", function(){
     const now = Date.now();
@@ -354,9 +348,9 @@ HTML = """
   }, {passive:false});
   document.addEventListener("touchend", function(){ lastDist = null; }, {passive:true});
 
-  // initial draw
+  // initial render
   updateVisuals();
-  console.log("Directional drag improved and vertical/horizontal mapping fixed.");
+  console.log("Slitherlink board ready (axis-following drag).");
 })();
 </script>
 </body>
