@@ -320,16 +320,29 @@ posted = html(html_code, height=iframe_height, scrolling=True)
 
 st.write("---")
 st.subheader("Exported state from iframe (click Export JSON in iframe)")
-if posted:
+if posted is not None:
     st.success("Received payload from iframe")
-    # be defensive: posted may already be a dict or a JSON string
-    try:
-        shown = posted if isinstance(posted, dict) else json.loads(posted)
-    except Exception:
+    # 1) show the raw posted value and its type for debugging
+    st.write("Received (raw):", repr(posted))
+    st.write("Type:", type(posted).__name__)
+
+    # 2) try to coerce into a plain JSON-like Python object (dict/list)
+    shown = None
+    if isinstance(posted, (dict, list)):
         shown = posted
-    try:
+    else:
+        # posted might be a JSON string; attempt to parse
+        try:
+            shown = json.loads(posted)
+        except Exception:
+            shown = None
+
+    # 3) only call st.json when we actually have dict or list
+    if isinstance(shown, (dict, list)):
+        st.subheader("Parsed JSON")
         st.json(shown)
-    except Exception:
-        st.write(shown)
+    else:
+        st.warning("Posted value is not valid JSON object/array — showing raw value instead.")
+        st.write(posted)
 else:
     st.info("No payload received yet. Click 'Export JSON' inside the board to send the state here.")
