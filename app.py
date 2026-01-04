@@ -38,10 +38,11 @@ HTML = """
   let pointerActive = false;
   let pointerMode = null;       // 'add' or 'remove'
   let initialEdge = null;       // key of the first selected edge
-  let dragAxis = null;          // 'h' or 'v' decided by first significant move
-  let lastAddedEdge = null;     // last edge added/removed (for stepping)
-  let startClient = null;       // {x,y} of initial pointerdown client coords
-  let viewBoxW = null, viewBoxH = null; // for coordinate mapping
+  let dragAxis = null;          // 'h' or 'v'
+  let lastAddedEdge = null;     // last edge acted on
+  let startClient = null;       // {x,y} initial client coords
+  let lastStep = 0;            // number of steps already applied
+  let viewBoxW = null, viewBoxH = null;
 
   function edgeKey(r,c,d){ return r + "," + c + "," + d; }
   function parseKey(key){ const p = key.split(','); return {r:parseInt(p[0],10), c:parseInt(p[1],10), d:p[2]}; }
@@ -54,10 +55,8 @@ HTML = """
   function vertexDegree(v){
     const vr=v.r, vc=v.c;
     let deg=0;
-    // horizontals
     if(vc-1 >= 0 && filled.has(edgeKey(vr,vc-1,'h'))) deg++;
     if(vc <= COLS-1 && filled.has(edgeKey(vr,vc,'h'))) deg++;
-    // verticals
     if(vr-1 >= 0 && filled.has(edgeKey(vr-1,vc,'v'))) deg++;
     if(vr <= ROWS-1 && filled.has(edgeKey(vr,vc,'v'))) deg++;
     return deg;
@@ -72,7 +71,7 @@ HTML = """
     return false;
   }
 
-  // build SVG
+  // build SVG and meta
   const width  = COLS * CELL + MARGIN * 2;
   const height = ROWS * CELL + MARGIN * 2;
   viewBoxW = width; viewBoxH = height;
@@ -90,7 +89,6 @@ HTML = """
   bg.setAttribute("fill", "transparent");
   svg.appendChild(bg);
 
-  // draw dots
   const dotR = 2;
   for(let r=0;r<=ROWS;r++){
     for(let c=0;c<=COLS;c++){
@@ -103,8 +101,6 @@ HTML = """
     }
   }
 
-  // create edge groups (vis + hit) but keep hit handlers lightweight;
-  // we'll still support pointerdown even if user clicks slightly off by computing nearest edge
   function createEdgeGroup(x1,y1,x2,y2,key){
     const g = document.createElementNS(SVG_NS,"g");
     g.setAttribute("data-edge", key);
@@ -123,59 +119,47 @@ HTML = """
     hit.setAttribute("stroke", "transparent");
     hit.style.cursor = "pointer";
 
-    // lightweight handlers here: but the primary selection logic will compute nearest edge if needed
-    hit.addEventListener("pointerdown", function(ev){
-      handlePointerDown(ev);
-    });
-    hit.addEventListener("pointerup", function(ev){
-      handlePointerUp(ev);
-    });
+    hit.addEventListener("pointerdown", handlePointerDown);
+    hit.addEventListener("pointerup", handlePointerUp);
 
     g.appendChild(vis); g.appendChild(hit);
-    svg.appendChild(g);
+    return g;
   }
 
+  // create all edges
   for(let r=0;r<=ROWS;r++){
     for(let c=0;c<COLS;c++){
       const x1 = MARGIN + c*CELL, y = MARGIN + r*CELL, x2 = x1 + CELL;
-      createEdgeGroup(x1,y,x2,y, edgeKey(r,c,'h'));
+      svg.appendChild(createEdgeGroup(x1,y,x2,y, edgeKey(r,c,'h')));
     }
   }
   for(let r=0;r<ROWS;r++){
     for(let c=0;c<=COLS;c++){
       const x = MARGIN + c*CELL, y1 = MARGIN + r*CELL, y2 = y1 + CELL;
-      createEdgeGroup(x,y1,x,y2, edgeKey(r,c,'v'));
+      svg.appendChild(createEdgeGroup(x,y1,x,y2, edgeKey(r,c,'v')));
     }
   }
 
-  // update visuals
   function updateVisuals(){
     svg.querySelectorAll("[data-edge]").forEach(function(g){
       const k = g.getAttribute("data-edge");
       const vis = g.querySelector(".vis");
-      if(filled.has(k)){
-        vis.setAttribute("stroke","#000");
-      } else {
-        vis.setAttribute("stroke","transparent");
-      }
+      if(filled.has(k)) vis.setAttribute("stroke","#000");
+      else vis.setAttribute("stroke","transparent");
     });
   }
 
-  // map client coords to viewBox coords (approximate, accounts for CSS scaling)
   function clientToViewBox(clientX, clientY){
     const rect = svg.getBoundingClientRect();
-    // fraction within rect
     const fx = (clientX - rect.left) / rect.width;
     const fy = (clientY - rect.top) / rect.height;
-    // map to viewBox (0..viewBoxW / viewBoxH)
     return { x: fx * viewBoxW, y: fy * viewBoxH };
   }
 
-  // compute nearest candidate edge to given client coords
+  // nearest edge calculation unchanged
   function nearestEdgeKeyForClient(clientX, clientY){
     const pt = clientToViewBox(clientX, clientY);
     const sx = pt.x, sy = pt.y;
-    // compute nearest horizontal candidate:
     const r_h = Math.round((sy - MARGIN) / CELL);
     const c_h = Math.floor((sx - MARGIN) / CELL);
     let dist_h = Infinity, key_h = null;
@@ -185,7 +169,6 @@ HTML = """
       dist_h = Math.hypot(sx - hx, sy - hy);
       key_h = edgeKey(r_h, c_h, 'h');
     }
-    // compute vertical candidate:
     const c_v = Math.round((sx - MARGIN) / CELL);
     const r_v = Math.floor((sy - MARGIN) / CELL);
     let dist_v = Infinity, key_v = null;
@@ -195,25 +178,23 @@ HTML = """
       dist_v = Math.hypot(sx - vx, sy - vy);
       key_v = edgeKey(r_v, c_v, 'v');
     }
-    // choose smaller distance
     if(dist_h <= dist_v) return key_h;
     return key_v;
   }
 
-  // core: handle pointerdown (choose nearest edge if needed)
+  // pointer handlers
   function handlePointerDown(ev){
     ev.preventDefault();
     try{ ev.target.setPointerCapture(ev.pointerId); } catch(e){}
     pointerActive = true;
     startClient = { x: ev.clientX, y: ev.clientY };
-    // pick nearest edge (even if the event was on background)
+    lastStep = 0;
     const chosen = nearestEdgeKeyForClient(ev.clientX, ev.clientY);
     if(!chosen) return;
     initialEdge = chosen;
     lastAddedEdge = chosen;
-    // decide add/remove based on current presence
     pointerMode = filled.has(chosen) ? 'remove' : 'add';
-    // do the immediate attempt (respecting degree rules)
+    // immediate attempt
     if(pointerMode === 'add'){
       if(!wouldExceedDegreeIfAdded(chosen)){
         filled.add(chosen);
@@ -221,11 +202,9 @@ HTML = """
         flash(chosen);
       }
     } else {
-      // remove
       filled.delete(chosen);
     }
     updateVisuals();
-    // dragAxis unknown until movement; set to null now
     dragAxis = null;
   }
 
@@ -237,80 +216,87 @@ HTML = """
     lastAddedEdge = null;
     startClient = null;
     dragAxis = null;
+    lastStep = 0;
   }
 
-  function flash(key){
-    const g = svg.querySelector(`[data-edge="${key}"]`);
-    if(!g) return;
-    const vis = g.querySelector('.vis');
-    vis.setAttribute('stroke','#d00');
-    setTimeout(()=>{ vis.setAttribute('stroke', filled.has(key) ? '#000' : 'transparent'); }, 180);
+  // determine column or row anchor when stepping across axis different from initial edge:
+  function verticalColumnForHorizontalBase(base, startClientView){
+    // base.c .. base.c+1 are the columns; choose which column to use for verticals
+    const midX = MARGIN + (base.c + 0.5) * CELL;
+    return (startClientView.x <= midX) ? base.c : base.c + 1;
+  }
+  function horizontalRowForVerticalBase(base, startClientView){
+    const midY = MARGIN + (base.r + 0.5) * CELL;
+    return (startClientView.y <= midY) ? base.r : base.r + 1;
   }
 
-  // pointermove: determine axis on first significant move; step along axis
+  // main pointermove: determine axis and apply NEW steps since lastStep
   document.addEventListener("pointermove", function(ev){
-    if(!pointerActive) return;
-    if(!startClient) return;
+    if(!pointerActive || !startClient || !initialEdge) return;
     const dx = ev.clientX - startClient.x;
     const dy = ev.clientY - startClient.y;
-    // determine axis if not set and movement significant
     if(!dragAxis){
-      if(Math.hypot(dx,dy) < 6) return; // ignore tiny tremble
+      if(Math.hypot(dx,dy) < 6) return;
       dragAxis = Math.abs(dx) >= Math.abs(dy) ? 'h' : 'v';
-      // record initial direction sign
-      // we will step based on sign of projection along axis relative to initial pointer
     }
-    // compute how far along axis we've moved relative to cell size in client space
-    // map movement in client pixels to viewBox units and then to cell steps
+    // map client movement to viewBox units per axis
     const rect = svg.getBoundingClientRect();
-    const unitPerClientX = viewBoxW / rect.width;
-    const unitPerClientY = viewBoxH / rect.height;
-    let step = 0;
+    const unitX = viewBoxW / rect.width;
+    const unitY = viewBoxH / rect.height;
+    let movedUnits = 0;
     let sign = 0;
     if(dragAxis === 'h'){
-      const moved_units = dx * unitPerClientX;
-      step = Math.floor(Math.abs(moved_units) / CELL);
-      sign = moved_units >= 0 ? 1 : -1;
+      movedUnits = dx * unitX;
+      sign = movedUnits >= 0 ? 1 : -1;
     } else {
-      const moved_units = dy * unitPerClientY;
-      step = Math.floor(Math.abs(moved_units) / CELL);
-      sign = moved_units >= 0 ? 1 : -1;
+      movedUnits = dy * unitY;
+      sign = movedUnits >= 0 ? 1 : -1;
     }
-    if(step <= 0) return;
-    // starting from initialEdge, step `step` times, adding/removing edges along axis in direction `sign`
-    let base = parseKey(initialEdge);
-    // base r,c,d correspond to the initial edge; we must step from that index
-    for(let s=1; s<=step; s++){
+    const stepsNow = Math.floor(Math.abs(movedUnits) / CELL);
+    if(stepsNow <= lastStep) return; // nothing new
+    const newSteps = stepsNow - lastStep;
+    // base parse
+    const base = parseKey(initialEdge);
+    // precompute startClient in view coords for anchor selection
+    const startView = clientToViewBox(startClient.x, startClient.y);
+
+    for(let s=1; s<=newSteps; s++){
       let keyToAct = null;
-      if(base.d === 'h' && dragAxis === 'h'){
-        const newC = base.c + sign * s;
-        const newR = base.r;
-        if(newC < 0 || newC >= COLS) break;
-        keyToAct = edgeKey(newR, newC, 'h');
-      } else if(base.d === 'v' && dragAxis === 'v'){
-        const newR = base.r + sign * s;
-        const newC = base.c;
-        if(newR < 0 || newR >= ROWS) break;
-        keyToAct = edgeKey(newR, newC, 'v');
-      } else if(base.d === 'h' && dragAxis === 'v'){
-        // user started on horizontal but dragged vertically; convert stepping along column
-        // choose vertical edges adjacent to the midpoint column
-        // map to vertical at column = base.c or base.c+1 depending on horizontal position
-        const colCandidate = (sign >= 0) ? base.c + 0 : base.c; // keep conservative mapping
-        const newR = base.r + sign * s;
-        const newC = base.c; // conservative
-        if(newR < 0 || newR >= ROWS) break;
-        keyToAct = edgeKey(newR, newC, 'v');
-      } else if(base.d === 'v' && dragAxis === 'h'){
-        // started vertical but dragging horizontal: choose horizontal edges adjacent
-        const newC = base.c + sign * s;
-        const newR = base.r;
-        if(newC < 0 || newC >= COLS) break;
-        keyToAct = edgeKey(newR, newC, 'h');
+      const stepIndex = lastStep + s; // distance in cells from initial
+      if(base.d === dragAxis){
+        // same orientation: straightforward
+        if(dragAxis === 'h'){
+          const newC = base.c + sign * stepIndex;
+          const newR = base.r;
+          if(newC < 0 || newC >= COLS) break;
+          keyToAct = edgeKey(newR, newC, 'h');
+        } else {
+          const newR = base.r + sign * stepIndex;
+          const newC = base.c;
+          if(newR < 0 || newR >= ROWS) break;
+          keyToAct = edgeKey(newR, newC, 'v');
+        }
+      } else {
+        // different orientation: map across to nearest adjacent index based on initial pointer position
+        if(base.d === 'h' && dragAxis === 'v'){
+          // started on horizontal edge; choose column (base.c or base.c+1) based on start x
+          const col = verticalColumnForHorizontalBase(base, startView);
+          const newR = base.r + sign * stepIndex;
+          if(newR < 0 || newR >= ROWS) break;
+          if(col < 0 || col > COLS) break;
+          keyToAct = edgeKey(newR, col, 'v');
+        } else if(base.d === 'v' && dragAxis === 'h'){
+          // started vertical; choose row (base.r or base.r+1) based on start y
+          const row = horizontalRowForVerticalBase(base, startView);
+          const newC = base.c + sign * stepIndex;
+          if(newC < 0 || newC >= COLS) break;
+          if(row < 0 || row > ROWS) break;
+          keyToAct = edgeKey(row, newC, 'h');
+        }
       }
+
       if(!keyToAct) continue;
-      // avoid repeating the same edge multiple times if lastAddedEdge already at or beyond it
-      // For simplicity, allow idempotent ops: adding when already present does nothing
+      // perform action respecting degree constraints
       if(pointerMode === 'add'){
         if(!filled.has(keyToAct)){
           if(!wouldExceedDegreeIfAdded(keyToAct)){
@@ -327,31 +313,11 @@ HTML = """
         }
       }
     }
+
+    lastStep = stepsNow;
     updateVisuals();
   }, {passive:true});
 
-  // helper: decide if adding this would exceed degree > 2
-  function wouldExceedDegreeIfAdded(key){
-    if(filled.has(key)) return false;
-    const eps = endpointsOf(key);
-    for(const v of eps){
-      if(vertexDegree(v) >= 2) return true;
-    }
-    return false;
-  }
-
-  // vertexDegree uses current filled set
-  function vertexDegree(v){
-    const vr=v.r, vc=v.c;
-    let deg=0;
-    if(vc-1 >= 0 && filled.has(edgeKey(vr,vc-1,'h'))) deg++;
-    if(vc <= COLS-1 && filled.has(edgeKey(vr,vc,'h'))) deg++;
-    if(vr-1 >= 0 && filled.has(edgeKey(vr-1,vc,'v'))) deg++;
-    if(vr <= ROWS-1 && filled.has(edgeKey(vr,vc,'v'))) deg++;
-    return deg;
-  }
-
-  // simple flash helper for blocked adds
   function flash(key){
     const g = svg.querySelector(`[data-edge="${key}"]`);
     if(!g) return;
@@ -360,7 +326,7 @@ HTML = """
     setTimeout(()=>{ vis.setAttribute('stroke', filled.has(key) ? '#000' : 'transparent'); }, 180);
   }
 
-  // double-tap zoom and pinch-to-zoom (unchanged)
+  // double-tap & pinch unchanged
   let lastTap = 0;
   document.addEventListener("touchend", function(){
     const now = Date.now();
@@ -388,11 +354,9 @@ HTML = """
   }, {passive:false});
   document.addEventListener("touchend", function(){ lastDist = null; }, {passive:true});
 
-  // initial visual update
+  // initial draw
   updateVisuals();
-
-  console.log("Slitherlink board ready (directional drag with degree constraint).");
-
+  console.log("Directional drag improved and vertical/horizontal mapping fixed.");
 })();
 </script>
 </body>
