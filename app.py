@@ -51,7 +51,7 @@ HTML = """
   const MOVE_THRESHOLD = 2;
 
   // detection radius: diameter = d/2 was previous; now radius = d/3 per request
-  const DETECT_RADIUS_WORLD = CELL / 3.0;
+  const DETECT_RADIUS_WORLD = CELL / 3.5;
 
   // helpers
   const edgeKey = (r,c,d) => `${r},${c},${d}`;
