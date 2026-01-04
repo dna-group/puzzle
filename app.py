@@ -253,37 +253,73 @@ html = r"""
     requestRender();
   }
 
-  function toggleZoom(worldCenter) {
-    const spacingIn = DOT_SPACING;
-    if (!zoomedOut) {
-      const grid = gridPixelSize(spacingIn);
-      const sx = viewport.width / grid.width;
-      const sy = viewport.height / grid.height;
-      const s = Math.min(sx, sy, 1.0);
-      scale = s;
-      zoomedOut = true;
-      const gW = grid.width * scale;
-      const gH = grid.height * scale;
+function toggleZoom(worldCenter) {
+  // spacing when fully zoomed-in
+  const fullSpacing = DOT_SPACING;
+  if (!zoomedOut) {
+    // --- go to zoomed-out view ---
+    // compute scale so whole grid fits
+    const grid = gridPixelSize(fullSpacing);
+    const sx = viewport.width / grid.width;
+    const sy = viewport.height / grid.height;
+    const s = Math.min(sx, sy, 1.0);
+
+    // new scale (zoomed-out)
+    const newScale = s;
+
+    // if a worldCenter (in current world coords) is provided, map it to zoomed-out coords
+    // factor = newScale / currentScale
+    if (worldCenter) {
+      const factor = newScale / scale;
+      // worldCenter is in pixels relative to current spacing; scale it
+      const centerX = worldCenter.x * factor;
+      const centerY = worldCenter.y * factor;
+
+      // compute grid pixel size at newScale
+      const gW = grid.width * newScale;
+      const gH = grid.height * newScale;
+
+      // centre viewport on the scaled point, with clamping
+      viewport.x = Math.min(Math.max(0, centerX - viewport.width / 2), Math.max(0, gW - viewport.width));
+      viewport.y = Math.min(Math.max(0, centerY - viewport.height / 2), Math.max(0, gH - viewport.height));
+    } else {
+      // default: center the whole grid
+      const gW = grid.width * newScale;
+      const gH = grid.height * newScale;
       viewport.x = Math.max(0, (gW - viewport.width) / 2);
       viewport.y = Math.max(0, (gH - viewport.height) / 2);
-      requestRender();
-    } else {
-      scale = 1.0;
-      zoomedOut = false;
-      const spacing = DOT_SPACING * scale;
-      const grid = gridPixelSize(spacing);
-      if (worldCenter) {
-        const centerX = worldCenter.x;
-        const centerY = worldCenter.y;
-        viewport.x = Math.min(Math.max(0, centerX - viewport.width / 2), Math.max(0, grid.width - viewport.width));
-        viewport.y = Math.min(Math.max(0, centerY - viewport.height / 2), Math.max(0, grid.height - viewport.height));
-      } else {
-        viewport.x = Math.max(0, (grid.width - viewport.width) / 2);
-        viewport.y = Math.max(0, (grid.height - viewport.height) / 2);
-      }
-      requestRender();
     }
+
+    // apply new scale and flag
+    scale = newScale;
+    zoomedOut = true;
+    requestRender();
+
+  } else {
+    // --- go to zoomed-in view (restore scale = 1.0) ---
+    const newScale = 1.0;
+    if (worldCenter) {
+      // worldCenter is passed relative to the zoomed-out world; when zooming in it should
+      // already be in "world" coords appropriate for the current scale, so just center on it.
+      const spacing = DOT_SPACING * newScale;
+      const grid = gridPixelSize(spacing);
+      const centerX = worldCenter.x;
+      const centerY = worldCenter.y;
+      viewport.x = Math.min(Math.max(0, centerX - viewport.width / 2), Math.max(0, grid.width - viewport.width));
+      viewport.y = Math.min(Math.max(0, centerY - viewport.height / 2), Math.max(0, grid.height - viewport.height));
+    } else {
+      const spacing = DOT_SPACING * newScale;
+      const grid = gridPixelSize(spacing);
+      viewport.x = Math.max(0, (grid.width - viewport.width) / 2);
+      viewport.y = Math.max(0, (grid.height - viewport.height) / 2);
+    }
+
+    scale = newScale;
+    zoomedOut = false;
+    requestRender();
   }
+}
+
 
   // --- pointer handling with long-press to toggle zoom ---
   let isDragging = false;
