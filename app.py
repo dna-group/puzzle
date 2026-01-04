@@ -1,5 +1,4 @@
 import streamlit as st
-from pathlib import Path
 
 st.set_page_config(page_title="Slitherlink (128×178)", layout="wide")
 st.markdown(
@@ -8,7 +7,7 @@ This page embeds a mobile-optimized Slitherlink canvas (128 × 178 dots).
 Controls:
 - Single tap: toggle an edge (add if none, remove if present). An edge is only added if there are currently < 2 lines on that edge.
 - Drag (touch or mouse): pan/scroll the large puzzle.
-- Double-tap (or double-click): toggle zoomed-out / zoomed-in. When zooming in from the overview, the zoom centers on the tapped region.
+- Long press: toggle zoomed-out / zoomed-in. When zooming in from the overview, the zoom centers on the pressed region.
 """
 )
 
@@ -28,19 +27,16 @@ html = r"""
 <div id="container">
   <canvas id="c"></canvas>
 </div>
-<div class="info">128 × 178 dots. Tap between dots to toggle an edge. Drag to pan. Double-tap to toggle zoom.</div>
+<div class="info">128 × 178 dots. Tap between dots to toggle an edge. Drag to pan. Long-press to toggle zoom.</div>
 
 <script>
 (() => {
-  // Grid dimensions
   const COLS = 128;
   const ROWS = 178;
 
-  // Edge storage:
   const horizontalEdges = new Uint8Array(ROWS * Math.max(0, COLS - 1));
   const verticalEdges = new Uint8Array(Math.max(0, ROWS - 1) * COLS);
 
-  // Canvas and rendering parameters
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d', {alpha:false});
   const DOT_SPACING = 28;
@@ -48,7 +44,6 @@ html = r"""
   const EDGE_WIDTH = 4.0;
   const MAX_EDGE_COUNT = 2;
 
-  // View state
   let scale = 1.0;
   let zoomedOut = false;
   let viewport = { x: 0, y: 0, width: 0, height: 0 };
@@ -87,8 +82,6 @@ html = r"""
     ctx.fillRect(0,0,canvas.clientWidth, canvas.clientHeight);
 
     const spacing = DOT_SPACING * scale;
-    const gridW = (COLS - 1) * spacing;
-    const gridH = (ROWS - 1) * spacing;
 
     const x0 = viewport.x;
     const y0 = viewport.y;
@@ -98,7 +91,6 @@ html = r"""
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // Horizontal edges
     const hCols = COLS - 1;
     for (let r=0; r<ROWS; r++) {
       const ry = r * spacing;
@@ -128,7 +120,6 @@ html = r"""
       }
     }
 
-    // Vertical edges
     const vRows = ROWS - 1;
     for (let r=0; r<vRows; r++) {
       const baseY = r * spacing;
@@ -159,7 +150,6 @@ html = r"""
       }
     }
 
-    // draw dots (visible)
     const dotColor = '#e6e6e6';
     ctx.fillStyle = dotColor;
     const rStart = Math.max(0, Math.floor((y0 - DOT_RADIUS) / spacing));
@@ -295,18 +285,18 @@ html = r"""
     }
   }
 
-  // --- pointer handling with double-tap suppression ---
+  // --- pointer handling with long-press to toggle zoom ---
   let isDragging = false;
   let lastPointer = null;
   let dragStart = null;
   let pointerMovedSinceDown = false;
 
-  // Double-tap detection / suppression
-  let lastTapTime = 0;
-  let lastTapPos = null;
-  const DOUBLE_TAP_DELAY = 300;
-  let suppressNextTap = false;
-  let doubleTapWorld = null;
+  const LONG_PRESS_MS = 450;
+  const MOVE_THRESHOLD = 8; // px
+
+  let longPressTimer = null;
+  let longPressFired = false;
+  let longPressWorld = null;
 
   canvas.addEventListener('pointerdown', (ev) => {
     ev.preventDefault();
@@ -315,25 +305,33 @@ html = r"""
     dragStart = { x: ev.clientX, y: ev.clientY, vx: viewport.x, vy: viewport.y };
     pointerMovedSinceDown = false;
     isDragging = true;
+    longPressFired = false;
+    longPressWorld = clientToWorld(ev.clientX, ev.clientY);
 
-    const timeNow = performance.now();
-    const isDoubleCandidate = (timeNow - lastTapTime) <= DOUBLE_TAP_DELAY &&
-                              lastTapPos &&
-                              Math.hypot(ev.clientX - lastTapPos.x, ev.clientY - lastTapPos.y) < 40;
-    if (isDoubleCandidate) {
-      suppressNextTap = true;
-      doubleTapWorld = clientToWorld(ev.clientX, ev.clientY);
-      lastTapTime = 0;
-      lastTapPos = null;
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
     }
+    longPressTimer = setTimeout(() => {
+      // Only fire long press if pointer hasn't moved much and still down
+      if (!pointerMovedSinceDown && isDragging) {
+        longPressFired = true;
+        toggleZoom(longPressWorld);
+      }
+      longPressTimer = null;
+    }, LONG_PRESS_MS);
   });
 
   canvas.addEventListener('pointermove', (ev) => {
     if (!isDragging || ev.pointerId !== lastPointer.id) return;
     const dx = ev.clientX - dragStart.x;
     const dy = ev.clientY - dragStart.y;
-    if (Math.hypot(dx, dy) > 4) {
+    if (Math.hypot(dx, dy) > MOVE_THRESHOLD) {
       pointerMovedSinceDown = true;
+      if (longPressTimer) {
+        clearTimeout(longPressTimer);
+        longPressTimer = null;
+      }
       viewport.x = Math.max(0, dragStart.vx - dx);
       viewport.y = Math.max(0, dragStart.vy - dy);
       const spacing = DOT_SPACING * scale;
@@ -351,27 +349,27 @@ html = r"""
     canvas.releasePointerCapture(ev.pointerId);
     isDragging = false;
 
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+
     const upX = ev.clientX;
     const upY = ev.clientY;
-    const timeNow = performance.now();
+
+    if (longPressFired) {
+      // long-press already handled zoom; do not toggle edge
+      longPressFired = false;
+      return;
+    }
 
     if (!pointerMovedSinceDown) {
-      if (suppressNextTap) {
-        toggleZoom(doubleTapWorld);
-        suppressNextTap = false;
-        doubleTapWorld = null;
-        return;
-      }
-
+      // treat as tap
       const world = clientToWorld(upX, upY);
       const edge = findClosestEdge(world.x, world.y);
       if (edge) toggleEdge(edge);
-
-      lastTapTime = timeNow;
-      lastTapPos = { x: upX, y: upY };
     } else {
-      suppressNextTap = false;
-      doubleTapWorld = null;
+      // ended a pan
     }
   });
 
@@ -379,9 +377,13 @@ html = r"""
     if (lastPointer && ev.pointerId === lastPointer.id) {
       isDragging = false;
       lastPointer = null;
-      suppressNextTap = false;
-      doubleTapWorld = null;
     }
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+    longPressFired = false;
+    longPressWorld = null;
   });
 
   canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
