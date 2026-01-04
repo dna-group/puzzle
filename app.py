@@ -14,18 +14,18 @@ html_code = r"""
   html,body {
     height:100%;
     margin:0;
-    background:#fff;
+    background:#ddd;   /* light grey page background */
   }
   #container {
     position:relative;
     height:100vh;
     width:100vw;
-    background:#fff;
+    background:#ddd;
     overflow:hidden;
   }
   canvas {
     display:block;
-    background:#fff;
+    background:#fff;   /* puzzle background */
     touch-action:none;
   }
 </style>
@@ -44,7 +44,6 @@ html_code = r"""
   const EDGE_HIT_RADIUS = 10;
   const INITIAL_ZOOM = 3.2;
 
-  // margin around grid so edges never clip
   const BORDER = DOT_SPACING * 2;
 
   const gridWidth  = (COLS - 1) * DOT_SPACING;
@@ -58,7 +57,14 @@ html_code = r"""
   const ctx = canvas.getContext("2d", { alpha:false });
 
   let zoom = INITIAL_ZOOM;
-  let viewport = { cx: fullWidth/2, cy: fullHeight/2, w: 800/zoom, h: 600/zoom };
+
+  /* ---- START AT TOP-LEFT ---- */
+  let viewport = {
+    cx: (canvas.width/zoom)/2,
+    cy: (canvas.height/zoom)/2,
+    w: 800/zoom,
+    h: 600/zoom
+  };
 
   const edges = new Map();
   const degree = new Map();
@@ -111,13 +117,15 @@ html_code = r"""
     canvas.height = container.clientHeight;
     viewport.w = canvas.width/zoom;
     viewport.h = canvas.height/zoom;
+    /* keep top-left locked on resize */
+    viewport.cx = viewport.w/2;
+    viewport.cy = viewport.h/2;
   }
 
   function draw(){
     ctx.fillStyle="#fff";
     ctx.fillRect(0,0,canvas.width,canvas.height);
 
-    // dots (black)
     ctx.fillStyle="#000";
     const r = Math.max(0.6,DOT_RADIUS*zoom/2);
     for(let y=0;y<ROWS;y++){
@@ -131,7 +139,6 @@ html_code = r"""
       }
     }
 
-    // edges (grey)
     ctx.strokeStyle="#888";
     ctx.lineWidth=Math.max(3,zoom*1.1);
     ctx.lineCap="round";
@@ -146,29 +153,7 @@ html_code = r"""
     ctx.stroke();
   }
 
-  function nearestEdge(fx,fy){
-    const gx=(fx-BORDER)/DOT_SPACING;
-    const gy=(fy-BORDER)/DOT_SPACING;
-    const ix=Math.round(gx), iy=Math.round(gy);
-    let best={d:1e9};
-    for(let dx=-1;dx<=1;dx++){
-      for(let dy=-1;dy<=1;dy++){
-        const x=ix+dx,y=iy+dy;
-        if(x>=0&&x+1<COLS&&y>=0&&y<ROWS){
-          const mx=BORDER+(x+0.5)*DOT_SPACING,my=BORDER+y*DOT_SPACING;
-          const d=(mx-fx)**2+(my-fy)**2;
-          if(d<best.d) best={d,a:{x,y},b:{x:x+1,y}};
-        }
-        if(x>=0&&x<COLS&&y>=0&&y+1<ROWS){
-          const mx=BORDER+x*DOT_SPACING,my=BORDER+(y+0.5)*DOT_SPACING;
-          const d=(mx-fx)**2+(my-fy)**2;
-          if(d<best.d) best={d,a:{x,y},b:{x,y:y+1}};
-        }
-      }
-    }
-    return best;
-  }
-
+  /* interaction unchanged */
   let down=false,start=null,drag=false;
   canvas.onpointerdown=e=>{
     down=true;drag=false;
@@ -197,6 +182,29 @@ html_code = r"""
       }
     }
   };
+
+  function nearestEdge(fx,fy){
+    const gx=(fx-BORDER)/DOT_SPACING;
+    const gy=(fy-BORDER)/DOT_SPACING;
+    const ix=Math.round(gx), iy=Math.round(gy);
+    let best={d:1e9};
+    for(let dx=-1;dx<=1;dx++){
+      for(let dy=-1;dy<=1;dy++){
+        const x=ix+dx,y=iy+dy;
+        if(x>=0&&x+1<COLS&&y>=0&&y<ROWS){
+          const mx=BORDER+(x+0.5)*DOT_SPACING,my=BORDER+y*DOT_SPACING;
+          const d=(mx-fx)**2+(my-fy)**2;
+          if(d<best.d) best={d,a:{x,y},b:{x:x+1,y}};
+        }
+        if(x>=0&&x<COLS&&y>=0&&y+1<ROWS){
+          const mx=BORDER+x*DOT_SPACING,my=BORDER+(y+0.5)*DOT_SPACING;
+          const d=(mx-fx)**2+(my-fy)**2;
+          if(d<best.d) best={d,a:{x,y},b:{x,y:y+1}};
+        }
+      }
+    }
+    return best;
+  }
 
   window.onresize=()=>{resize();draw();};
   resize();
