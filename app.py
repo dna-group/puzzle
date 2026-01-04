@@ -1,9 +1,10 @@
 # app.py
-# Streamlit app: Slitherlink with zoomed-in editing and a minimap (bottom-right)
+# Streamlit app: Slitherlink with zoomed-in editing only (no minimap)
 # - Grid: 128 x 178 dots
-# - Minimap shows the entire puzzle (NO viewport rectangle)
-# - Click-and-drag on the zoomed canvas pans the viewport (minimap still updates edges but no rectangle)
+# - Click to toggle edge (degree ≤ 2)
+# - Click+drag pans the zoomed viewport
 # - Dots are white on a black background
+# - Lines are white and slightly thicker
 #
 # Usage:
 #   pip install streamlit
@@ -14,7 +15,7 @@ from streamlit.components.v1 import html
 
 st.set_page_config(layout="wide")
 
-st.markdown("## Slitherlink — Zoomed Editing + Minimap (no rectangle)")
+st.markdown("## Slitherlink — Zoomed Editing (no minimap)")
 
 html_code = r"""
 <!doctype html>
@@ -22,13 +23,12 @@ html_code = r"""
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Slitherlink Zoom + Minimap (no rectangle)</title>
+<title>Slitherlink — Zoom Only</title>
 <style>
   html,body { height:100%; margin:0; font-family: Arial, sans-serif; background:#000; color:#fff; }
   #container { position:relative; height:80vh; width:100%; background:#000; overflow:hidden; }
-  canvas { display:block; }
+  canvas { display:block; width:100%; height:100%; }
   #mainCanvas { background: #000; touch-action: none; }
-  #minimap { position:absolute; bottom:18px; right:18px; background:#000; border:1px solid #222; box-shadow:0 2px 8px rgba(0,0,0,0.6); }
   #hud { position:absolute; left:12px; top:12px; background:rgba(0,0,0,0.6); color:#fff; padding:6px 8px; border-radius:6px; border:1px solid #333; font-size:13px; z-index:5; }
   .btn { padding:6px 8px; border-radius:4px; border:1px solid #444; background:#111; color:#fff; cursor:pointer; display:inline-block; margin-right:6px; }
 </style>
@@ -43,7 +43,6 @@ html_code = r"""
   </div>
 
   <canvas id="mainCanvas"></canvas>
-  <canvas id="minimap"></canvas>
 </div>
 
 <script>
@@ -57,7 +56,6 @@ html_code = r"""
   const MIN_ZOOM = 0.6;
   const MAX_ZOOM = 8.0;
   const INITIAL_ZOOM = 3.2;
-  const MINIMAP_MAX_LONG_SIDE = 300; // px
 
   // logical full-space size (coordinates in "full pixels")
   const fullWidth = (COLS - 1) * DOT_SPACING;
@@ -66,9 +64,7 @@ html_code = r"""
   // DOM elements
   const container = document.getElementById('container');
   const mainC = document.getElementById('mainCanvas');
-  const miniC = document.getElementById('minimap');
   const mc = mainC.getContext('2d', { alpha: false });
-  const mm = miniC.getContext('2d');
   const zoomInBtn = document.getElementById('zoomInBtn');
   const zoomOutBtn = document.getElementById('zoomOutBtn');
   const resetBtn = document.getElementById('resetBtn');
@@ -156,26 +152,6 @@ html_code = r"""
     return best;
   }
 
-  // MINIMAP sizing: choose a canvas size that fits puzzle aspect ratio with a max long side,
-  // and ensure the minimap shows the whole puzzle (scale = min(availW/fullWidth, availH/fullHeight)).
-  function sizeMinimap(){
-    const ratio = fullWidth / fullHeight;
-    let w, h;
-    if (ratio >= 1){ // landscape
-      w = MINIMAP_MAX_LONG_SIDE;
-      h = Math.round(MINIMAP_MAX_LONG_SIDE / ratio);
-    } else {
-      h = MINIMAP_MAX_LONG_SIDE;
-      w = Math.round(MINIMAP_MAX_LONG_SIDE * ratio);
-    }
-    // leave a small border for visuals
-    const border = 8;
-    miniC.width = w + border;
-    miniC.height = h + border;
-    miniC.style.width = (w + border) + "px";
-    miniC.style.height = (h + border) + "px";
-  }
-
   // Main canvas sizing
   function resizeMainCanvas(){
     const rect = container.getBoundingClientRect();
@@ -191,7 +167,7 @@ html_code = r"""
 
   // Drawing functions
   function draw(){
-    // draw main (zoomed) canvas: black background, white dots, blue edges
+    // draw main (zoomed) canvas: black background, white dots, white edges
     mc.clearRect(0,0, mainC.width, mainC.height);
     mc.fillStyle = '#000'; mc.fillRect(0,0, mainC.width, mainC.height);
 
@@ -217,9 +193,10 @@ html_code = r"""
       }
     }
 
-    // draw edges on main canvas
-    mc.lineWidth = Math.max(1, Math.min(3, zoom*0.9));
-    mc.strokeStyle = '#0b4da2';
+    // draw edges on main canvas: white and slightly thicker
+    // thickness scales with zoom but is clamped
+    mc.lineWidth = Math.max(2, Math.min(6, zoom * 1.2));
+    mc.strokeStyle = '#fff';
     mc.lineCap = 'round';
     mc.beginPath();
     edges.forEach((v,k) => {
@@ -232,54 +209,10 @@ html_code = r"""
       mc.lineTo(p2.x, p2.y);
     });
     mc.stroke();
-
-    // draw minimap (whole puzzle) without viewport rectangle
-    drawMinimap();
-  }
-
-  function drawMinimap(){
-    const mw = miniC.width, mh = miniC.height;
-    mm.clearRect(0,0,mw,mh);
-    mm.fillStyle = '#000'; mm.fillRect(0,0,mw,mh);
-
-    // compute scale so the *entire* puzzle fits inside minimap interior (with pad)
-    const pad = 6;
-    const availW = mw - pad*2, availH = mh - pad*2;
-    const scale = Math.min(availW / fullWidth, availH / fullHeight);
-    // compute top-left offset to center the puzzle in the minimap
-    const offX = (mw - fullWidth*scale) / 2;
-    const offY = (mh - fullHeight*scale) / 2;
-
-    // draw a sparse set of dots (white) to indicate grid on minimap
-    mm.fillStyle = '#fff';
-    const dotStep = 12; // sparse for performance
-    for (let j=0; j<ROWS; j+=dotStep){
-      for (let i=0; i<COLS; i+=dotStep){
-        const x = offX + i*DOT_SPACING*scale;
-        const y = offY + j*DOT_SPACING*scale;
-        mm.fillRect(x-0.5, y-0.5, 1, 1);
-      }
-    }
-
-    // draw edges (scaled)
-    mm.strokeStyle = '#0b4da2';
-    mm.lineWidth = 1;
-    mm.beginPath();
-    edges.forEach((v,k) => {
-      const [n1,n2] = k.split('|');
-      const [i1,j1] = n1.split(',').map(Number);
-      const [i2,j2] = n2.split(',').map(Number);
-      const x1 = offX + i1*DOT_SPACING*scale, y1 = offY + j1*DOT_SPACING*scale;
-      const x2 = offX + i2*DOT_SPACING*scale, y2 = offY + j2*DOT_SPACING*scale;
-      mm.moveTo(x1,y1); mm.lineTo(x2,y2);
-    });
-    mm.stroke();
-
-    // NOTE: intentionally not drawing a viewport rectangle per request
   }
 
   // Interaction: click on main toggles nearest edge (within threshold)
-  // click+drag on main pans viewport (and updates minimap edges but no rectangle)
+  // click+drag on main pans viewport
   let isPointerDown = false;
   let pointerStart = null;
   let isDragging = false;
@@ -342,26 +275,6 @@ html_code = r"""
     draw();
   }
 
-  // Clicking minimap: map clicked minimap coords -> full-space center and recenter viewport.
-  miniC.addEventListener('click', (ev) => {
-    const rect = miniC.getBoundingClientRect();
-    const sx = ev.clientX - rect.left;
-    const sy = ev.clientY - rect.top;
-    // compute minimap scale & offsets same as drawMinimap
-    const mw = miniC.width, mh = miniC.height;
-    const pad = 6;
-    const availW = mw - pad*2, availH = mh - pad*2;
-    const scale = Math.min(availW / fullWidth, availH / fullHeight);
-    const offX = (mw - fullWidth*scale) / 2;
-    const offY = (mh - fullHeight*scale) / 2;
-    const fx = (sx - offX) / scale;
-    const fy = (sy - offY) / scale;
-    const halfW = viewport.w/2, halfH = viewport.h/2;
-    viewport.cx = Math.max(halfW, Math.min(fullWidth - halfW, fx));
-    viewport.cy = Math.max(halfH, Math.min(fullHeight - halfH, fy));
-    draw();
-  });
-
   // Zoom controls (keep viewport centre when zooming)
   function setZoom(newZoom){
     const oldCenter = { cx: viewport.cx, cy: viewport.cy };
@@ -384,7 +297,6 @@ html_code = r"""
   // Resize handling
   window.addEventListener('resize', ()=> {
     resizeMainCanvas();
-    sizeMinimap();
     viewport.w = mainC.width / zoom;
     viewport.h = mainC.height / zoom;
     viewport.cx = Math.max(viewport.w/2, Math.min(fullWidth - viewport.w/2, viewport.cx));
@@ -394,7 +306,6 @@ html_code = r"""
 
   // init
   resizeMainCanvas();
-  sizeMinimap();
   viewport.w = mainC.width / zoom;
   viewport.h = mainC.height / zoom;
   draw();
