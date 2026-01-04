@@ -320,36 +320,43 @@ html = r"""
     lastPointer.y = ev.clientY;
   });
 
-  canvas.addEventListener('pointerup', (ev) => {
-    if (!lastPointer || ev.pointerId !== lastPointer.id) return;
-    canvas.releasePointerCapture(ev.pointerId);
-    isDragging = false;
+canvas.addEventListener('pointerup', (ev) => {
+  if (!lastPointer || ev.pointerId !== lastPointer.id) return;
+  canvas.releasePointerCapture(ev.pointerId);
+  isDragging = false;
 
-    const upX = ev.clientX;
-    const upY = ev.clientY;
+  const upX = ev.clientX;
+  const upY = ev.clientY;
 
-    // if click/tap inside minimap, recentre main view
-    if (pointInMinimap(upX, upY)) {
-      const wx = minimapToWorldX(upX);
-      const wy = minimapToWorldY(upY);
-      // center viewport on this world point
-      const grid = gridPixelSize(DOT_SPACING);
-      viewport.x = Math.min(Math.max(0, wx - viewport.width / 2), Math.max(0, grid.width - viewport.width));
-      viewport.y = Math.min(Math.max(0, wy - viewport.height / 2), Math.max(0, grid.height - viewport.height));
-      requestRender();
-      return;
-    }
+  // If click/tap inside minimap, recentre main view AND toggle the nearest edge there
+  if (pointInMinimap(upX, upY)) {
+    const wx = minimapToWorldX(upX);
+    const wy = minimapToWorldY(upY);
 
-    if (!pointerMovedSinceDown) {
-      // treat as tap on main canvas: toggle edge
-      const world = clientToWorld(upX, upY);
-      const edge = findClosestEdge(world.x, world.y);
-      if (edge) toggleEdge(edge);
-      requestRender();
-    } else {
-      // ended a pan; already rendered while moving
-    }
-  });
+    // center viewport on this world point
+    const grid = gridPixelSize(DOT_SPACING);
+    viewport.x = Math.min(Math.max(0, wx - viewport.width / 2), Math.max(0, grid.width - viewport.width));
+    viewport.y = Math.min(Math.max(0, wy - viewport.height / 2), Math.max(0, grid.height - viewport.height));
+
+    // toggle the nearest edge at that world coordinate so both views show the change
+    const edge = findClosestEdge(wx, wy);
+    if (edge) toggleEdge(edge);
+
+    requestRender();
+    return;
+  }
+
+  if (!pointerMovedSinceDown) {
+    // treat as tap on main canvas: toggle edge (existing behavior)
+    const world = clientToWorld(upX, upY);
+    const edge = findClosestEdge(world.x, world.y);
+    if (edge) toggleEdge(edge);
+    requestRender();
+  } else {
+    // ended a pan; already rendered while moving
+  }
+});
+
 
   canvas.addEventListener('pointercancel', (ev) => {
     if (lastPointer && ev.pointerId === lastPointer.id) {
