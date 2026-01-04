@@ -1,369 +1,443 @@
-# app.py edited
 import streamlit as st
-from streamlit.components.v1 import html
+from pathlib import Path
 
-st.set_page_config(page_title="Slitherlink Canvas (tap-to-toggle, drag-to-pan)", layout="wide")
+st.set_page_config(page_title="Slitherlink (128×178)", layout="wide")
+st.markdown(
+    """
+This page embeds a mobile-optimized Slitherlink canvas (128 × 178 dots).
+Controls:
+- Single tap: toggle an edge (add if none, remove if present). An edge is only added if there are currently < 2 lines on that edge (safeguard).
+- Drag (touch or mouse): pan/scroll the large puzzle.
+- Double-tap (or double-click): toggle zoomed-out / zoomed-in. When zooming in from the overview, the zoom centers on the tapped region.
+"""
+)
 
-# Board parameters — kept from last request
-DOTS_X = 128
-DOTS_Y = 178
-ROWS = DOTS_Y - 1
-COLS = DOTS_X - 1
-CELL_PX = 16
-IFRAME_HEIGHT = 1200
-
-HTML = """
+html = r"""
 <!doctype html>
 <html>
 <head>
-<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=4.0"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
 <style>
-  html,body{margin:0;padding:0;height:100%;background:#fff;overflow:hidden}
-  #root{width:100%;height:100vh;display:flex;align-items:stretch;justify-content:stretch}
-  canvas{display:block; width:100%; height:100%;}
-  body,canvas { -webkit-user-select: none; -ms-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  html,body { height:100%; margin:0; background:#111; color:#ddd; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; -ms-touch-action: none; touch-action: none; }
+  #container { height:88vh; display:flex; align-items:center; justify-content:center; }
+  canvas { background: #0b0b0b; touch-action: none; border-radius:8px; box-shadow: 0 6px 18px rgba(0,0,0,0.6); }
+  .info { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; font-size:12px; color:#bbb; padding:8px 12px; }
 </style>
 </head>
 <body>
-<div id="root"><canvas id="board"></canvas></div>
+<div id="container">
+  <canvas id="c"></canvas>
+</div>
+<div class="info">128 × 178 dots. Tap between dots to toggle an edge. Drag to pan. Double-tap to toggle zoom.</div>
 
 <script>
-(function(){
-  // config
-  const ROWS = __ROWS__, COLS = __COLS__, CELL = __CELL__, MARGIN = 6;
-  const canvas = document.getElementById('board');
-  const ctx = canvas.getContext('2d', { alpha: false });
-  const dpr = Math.max(1, window.devicePixelRatio || 1);
+(() => {
+  // Grid dimensions
+  const COLS = 128;
+  const ROWS = 178;
 
-  // state
-  const filled = new Set();
+  // Edge storage:
+  // horizontalEdges[r][c] = 0..2 (edge between (r,c) and (r,c+1)), size ROWS x (COLS-1)
+  // verticalEdges[r][c] = 0..2 (edge between (r,c) and (r+1,c)), size (ROWS-1) x COLS
+  const horizontalEdges = new Uint8Array(ROWS * Math.max(0, COLS - 1));
+  const verticalEdges = new Uint8Array(Math.max(0, ROWS - 1) * COLS);
+
+  // Canvas and rendering parameters
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', {alpha:false});
+  // Dot spacing in "zoomed in" mode
+  const DOT_SPACING = 28;   // pixels between dots in zoomed mode (adjust for typical mobile)
+  const DOT_RADIUS = 2.0;
+  const EDGE_WIDTH = 4.0;
+  const MAX_EDGE_COUNT = 2; // add only if fewer than 2 lines present
+
+  // View state
   let scale = 1.0;
-  let tx = 0, ty = 0; // translation in canvas pixels
-  const viewW = COLS * CELL + MARGIN * 2;
-  const viewH = ROWS * CELL + MARGIN * 2;
+  let zoomedOut = false;
+  let viewport = { // in world coordinates (pixels relative to grid origin)
+    x: 0, y: 0, width: 0, height: 0
+  };
 
-  // interaction state
-  let pointerActive = false;
-  let activePointerId = null;
-  let pointerStart = null;     // {x,y} client coords at down
-  let pointerLast = null;      // last client coords during move
-  let isPanning = false;
-  const MOVE_THRESHOLD = 6;    // pixels to decide pan vs tap
-
-  // multitouch pinch state
-  let lastPinchDist = null;
-  let lastPinchCenter = null;
-
-  // detection circle radius for tap toggle: radius = d/3 (d == CELL)
-  const DETECT_RADIUS_WORLD = CELL / 3.5;
-
-  // helpers
-  const edgeKey = (r,c,d) => `${r},${c},${d}`;
-  function parseKey(k){ const p=k.split(','); return {r:+p[0], c:+p[1], d:p[2]}; }
-  function endpointsOf(key){
-    const p = parseKey(key);
-    return p.d === 'h' ? [{r:p.r,c:p.c},{r:p.r,c:p.c+1}] : [{r:p.r,c:p.c},{r:p.r+1,c:p.c}];
-  }
-  function vertexDegree(v){
-    let deg=0;
-    if(v.c-1>=0 && filled.has(edgeKey(v.r,v.c-1,'h'))) deg++;
-    if(v.c<=COLS-1 && filled.has(edgeKey(v.r,v.c,'h'))) deg++;
-    if(v.r-1>=0 && filled.has(edgeKey(v.r-1,v.c,'v'))) deg++;
-    if(v.r<=ROWS-1 && filled.has(edgeKey(v.r,v.c,'v'))) deg++;
-    return deg;
-  }
-  function wouldExceedIfAdd(k){
-    if(filled.has(k)) return false;
-    for(const v of endpointsOf(k)) if(vertexDegree(v) >= 2) return true;
-    return false;
+  // Precompute grid pixel size at zoomed-in scale
+  function gridPixelSize(spacing) {
+    return { width: (COLS - 1) * spacing, height: (ROWS - 1) * spacing };
   }
 
-  // coordinate conversions (pixel-aligned drawing)
-  function worldToCanvasPx(wx, wy){
-    const sx = Math.round(wx * scale * dpr + tx);
-    const sy = Math.round(wy * scale * dpr + ty);
-    return { x: sx, y: sy };
-  }
-  function clientToWorld(cx, cy){
-    const rect = canvas.getBoundingClientRect();
-    const cx_px = (cx - rect.left) * dpr;
-    const cy_px = (cy - rect.top) * dpr;
-    return { x: (cx_px - tx) / (scale * dpr), y: (cy_px - ty) / (scale * dpr) };
+  // Device pixel ratio
+  const DPR = Math.max(1, window.devicePixelRatio || 1);
+
+  // Resize canvas to available container while respecting DPR
+  function fitCanvas() {
+    const rect = document.getElementById('container').getBoundingClientRect();
+    // keep some padding
+    const cw = Math.max(300, rect.width - 24);
+    const ch = Math.max(300, rect.height - 24);
+    canvas.style.width = cw + 'px';
+    canvas.style.height = ch + 'px';
+    canvas.width = Math.round(cw * DPR);
+    canvas.height = Math.round(ch * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    // keep viewport size consistent in world pixels
+    viewport.width = canvas.clientWidth;
+    viewport.height = canvas.clientHeight;
   }
 
-  // nearest edge + distance to its midpoint in world units
-  function nearestEdgeToWorldWithDist(wx, wy){
-    // horizontal candidate
-    const r_h = Math.round((wy - MARGIN) / CELL);
-    const c_h = Math.floor((wx - MARGIN) / CELL);
-    let dist_h = Infinity, key_h = null;
-    if(r_h >= 0 && r_h <= ROWS && c_h >= 0 && c_h < COLS){
-      const hx = MARGIN + (c_h + 0.5) * CELL, hy = MARGIN + r_h * CELL;
-      dist_h = Math.hypot(wx - hx, wy - hy);
-      key_h = edgeKey(r_h, c_h, 'h');
+  window.addEventListener('resize', () => { fitCanvas(); requestRender(); });
+
+  // Render loop
+  let pendingRender = false;
+  function requestRender() {
+    if (!pendingRender) {
+      pendingRender = true;
+      window.requestAnimationFrame(() => { pendingRender = false; render(); });
     }
-    // vertical candidate
-    const c_v = Math.round((wx - MARGIN) / CELL);
-    const r_v = Math.floor((wy - MARGIN) / CELL);
-    let dist_v = Infinity, key_v = null;
-    if(c_v >= 0 && c_v <= COLS && r_v >= 0 && r_v < ROWS){
-      const vx = MARGIN + c_v * CELL, vy = MARGIN + (r_v + 0.5) * CELL;
-      dist_v = Math.hypot(wx - vx, wy - vy);
-      key_v = edgeKey(r_v, c_v, 'v');
-    }
-    if(dist_h <= dist_v) return { key: key_h, dist: dist_h };
-    return { key: key_v, dist: dist_v };
   }
 
-  // drawing
-  function resizeCanvas(){
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = Math.max(1, Math.floor(rect.width * dpr));
-    canvas.height = Math.max(1, Math.floor(rect.height * dpr));
-    draw();
-  }
+  function render() {
+    // Clear (draw background)
+    ctx.fillStyle = '#0b0b0b';
+    ctx.fillRect(0,0,canvas.clientWidth, canvas.clientHeight);
 
-  function clearCanvas(){
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0,0,canvas.width,canvas.height);
-  }
+    const spacing = DOT_SPACING * scale;
+    const gridW = (COLS - 1) * spacing;
+    const gridH = (ROWS - 1) * spacing;
 
-  function draw(){
-    clearCanvas();
+    // visible world bounds
+    const x0 = viewport.x;
+    const y0 = viewport.y;
+    const x1 = viewport.x + viewport.width;
+    const y1 = viewport.y + viewport.height;
+
+    // draw edges (visible subset)
     ctx.lineCap = 'round';
-    ctx.lineWidth = Math.max(1, Math.floor(0.18 * CELL * scale * dpr));
-    ctx.strokeStyle = '#000';
+    ctx.lineJoin = 'round';
 
-    // draw filled edges
-    filled.forEach(k=>{
-      const p = parseKey(k);
-      if(p.d === 'h'){
-        const x1w = MARGIN + p.c * CELL, y = MARGIN + p.r * CELL;
-        const x2w = x1w + CELL;
-        const a = worldToCanvasPx(x1w, y), b = worldToCanvasPx(x2w, y);
-        ctx.beginPath(); ctx.moveTo(a.x + 0.5, a.y + 0.5); ctx.lineTo(b.x + 0.5, b.y + 0.5); ctx.stroke();
-      } else {
-        const x = MARGIN + p.c * CELL, y1w = MARGIN + p.r * CELL, y2w = y1w + CELL;
-        const a = worldToCanvasPx(x, y1w), b = worldToCanvasPx(x, y2w);
-        ctx.beginPath(); ctx.moveTo(a.x + 0.5, a.y + 0.5); ctx.lineTo(b.x + 0.5, b.y + 0.5); ctx.stroke();
-      }
-    });
+    // Horizontal edges
+    const hCols = COLS - 1;
+    for (let r=0; r<ROWS; r++) {
+      // compute y of row
+      const ry = r * spacing;
+      if (ry + DOT_RADIUS < y0 - spacing || ry - DOT_RADIUS > y1 + spacing) continue;
+      for (let c=0; c<hCols; c++) {
+        const idx = r * hCols + c;
+        const val = horizontalEdges[idx];
+        if (val === 0) continue;
+        const xstart = c * spacing;
+        const xend = (c+1) * spacing;
+        // bounding check
+        if (xend < x0 - spacing || xstart > x1 + spacing) continue;
+        // draw one or two lines slightly offset if val==2
+        ctx.strokeStyle = '#00d0ff';
+        ctx.lineWidth = EDGE_WIDTH;
+        ctx.beginPath();
+        ctx.moveTo(xstart - viewport.x, ry - viewport.y);
+        ctx.lineTo(xend - viewport.x, ry - viewport.y);
+        ctx.stroke();
 
-    // draw dots on top
-    ctx.fillStyle = '#000';
-    const dotRadiusPx = Math.max(1, Math.round(0.12 * CELL * scale * dpr));
-    for(let r=0;r<=ROWS;r++){
-      const wy = MARGIN + r * CELL;
-      for(let c=0;c<=COLS;c++){
-        const wx = MARGIN + c * CELL;
-        const p = worldToCanvasPx(wx, wy);
-        ctx.beginPath(); ctx.arc(p.x, p.y, dotRadiusPx, 0, Math.PI*2); ctx.fill();
-      }
-    }
-  }
-
-  function flashBlocked(key){
-    const p = parseKey(key);
-    ctx.lineCap = 'round';
-    ctx.lineWidth = Math.max(1, Math.floor(0.18 * CELL * scale * dpr));
-    ctx.strokeStyle = '#d00';
-    if(p.d === 'h'){
-      const x1w = MARGIN + p.c * CELL, y = MARGIN + p.r * CELL, x2w = x1w + CELL;
-      const a = worldToCanvasPx(x1w, y), b = worldToCanvasPx(x2w, y);
-      ctx.beginPath(); ctx.moveTo(a.x + 0.5, a.y + 0.5); ctx.lineTo(b.x + 0.5, b.y + 0.5); ctx.stroke();
-    } else {
-      const x = MARGIN + p.c * CELL, y1w = MARGIN + p.r * CELL, y2w = y1w + CELL;
-      const a = worldToCanvasPx(x, y1w), b = worldToCanvasPx(x, y2w);
-      ctx.beginPath(); ctx.moveTo(a.x + 0.5, a.y + 0.5); ctx.lineTo(b.x + 0.5, b.y + 0.5); ctx.stroke();
-    }
-    setTimeout(draw, 160);
-  }
-
-  // pointer helpers: handle tap (toggle) and pan
-  function handleTapToggle(clientX, clientY){
-    const w = clientToWorld(clientX, clientY);
-    const nearest = nearestEdgeToWorldWithDist(w.x, w.y);
-    if(!nearest || !nearest.key) return;
-    if(nearest.dist <= DETECT_RADIUS_WORLD){
-      // toggle with degree constraint on add
-      if(filled.has(nearest.key)){
-        filled.delete(nearest.key);
-        draw();
-      } else {
-        if(!wouldExceedIfAdd(nearest.key)){
-          filled.add(nearest.key);
-          draw();
-        } else {
-          flashBlocked(nearest.key);
+        if (val === 2) {
+          // draw second thinner line parallel (subtle)
+          ctx.strokeStyle = '#0090a0';
+          ctx.lineWidth = EDGE_WIDTH - 1.6;
+          ctx.beginPath();
+          ctx.moveTo(xstart - viewport.x, ry - viewport.y - 3);
+          ctx.lineTo(xend - viewport.x, ry - viewport.y - 3);
+          ctx.stroke();
         }
       }
     }
+
+    // Vertical edges
+    const vRows = ROWS - 1;
+    for (let r=0; r<vRows; r++) {
+      const baseY = r * spacing;
+      if (baseY + spacing + DOT_RADIUS < y0 - spacing || baseY - DOT_RADIUS > y1 + spacing) continue;
+      for (let c=0; c<COLS; c++) {
+        const idx = r * COLS + c;
+        const val = verticalEdges[idx];
+        if (val === 0) continue;
+        const x = c * spacing;
+        const ystart = baseY;
+        const yend = baseY + spacing;
+        if (x + DOT_RADIUS < x0 - spacing || x - DOT_RADIUS > x1 + spacing) continue;
+        ctx.strokeStyle = '#00d0ff';
+        ctx.lineWidth = EDGE_WIDTH;
+        ctx.beginPath();
+        ctx.moveTo(x - viewport.x, ystart - viewport.y);
+        ctx.lineTo(x - viewport.x, yend - viewport.y);
+        ctx.stroke();
+
+        if (val === 2) {
+          ctx.strokeStyle = '#0090a0';
+          ctx.lineWidth = EDGE_WIDTH - 1.6;
+          ctx.beginPath();
+          ctx.moveTo(x - viewport.x + 3, ystart - viewport.y);
+          ctx.lineTo(x - viewport.x + 3, yend - viewport.y);
+          ctx.stroke();
+        }
+      }
+    }
+
+    // draw dots (visible)
+    const dotColor = '#e6e6e6';
+    ctx.fillStyle = dotColor;
+    const rStart = Math.max(0, Math.floor((y0 - DOT_RADIUS) / spacing));
+    const rEnd = Math.min(ROWS - 1, Math.ceil((y1 + DOT_RADIUS) / spacing));
+    const cStart = Math.max(0, Math.floor((x0 - DOT_RADIUS) / spacing));
+    const cEnd = Math.min(COLS - 1, Math.ceil((x1 + DOT_RADIUS) / spacing));
+    for (let r=rStart; r<=rEnd; r++) {
+      const ry = r * spacing - viewport.y;
+      for (let c=cStart; c<=cEnd; c++) {
+        const rx = c * spacing - viewport.x;
+        // draw dot
+        ctx.beginPath();
+        ctx.arc(rx, ry, DOT_RADIUS * (scale + 0.1), 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
   }
 
-  // pointer events: single-pointer pan; tap toggles edges (no drag-to-draw)
-  canvas.addEventListener('pointerdown', function(ev){
-    // ignore non-primary pointers
-    if(ev.isPrimary === false) return;
-    ev.preventDefault();
-    try{ ev.target.setPointerCapture(ev.pointerId); } catch(e){}
-    pointerActive = true;
-    activePointerId = ev.pointerId;
-    pointerStart = { x: ev.clientX, y: ev.clientY };
-    pointerLast = { x: ev.clientX, y: ev.clientY };
-    isPanning = false;
-  }, {passive:false});
-
-  canvas.addEventListener('pointermove', function(ev){
-    if(!pointerActive || ev.pointerId !== activePointerId) return;
-    // if two-finger pinch is active (handled separately via touch events), skip here
-    const dx = ev.clientX - pointerLast.x;
-    const dy = ev.clientY - pointerLast.y;
-    pointerLast = { x: ev.clientX, y: ev.clientY };
-
-    const totalDx = ev.clientX - pointerStart.x;
-    const totalDy = ev.clientY - pointerStart.y;
-    if(!isPanning && Math.hypot(totalDx, totalDy) >= MOVE_THRESHOLD){
-      isPanning = true; // start panning
-    }
-    if(isPanning){
-      // apply pan in canvas pixels, respecting dpr & scale already baked into tx/ty logic
-      // We moved in client pixels; convert to canvas pixels by *dpr*
-      tx += dx * dpr;
-      ty += dy * dpr;
-      draw();
-    }
-  }, {passive:true});
-
-  canvas.addEventListener('pointerup', function(ev){
-    if(ev.pointerId !== activePointerId) return;
-    try{ ev.target.releasePointerCapture(ev.pointerId); } catch(e){}
-    // if it was not a pan (i.e., small movement), treat as tap
-    const totalDx = ev.clientX - pointerStart.x;
-    const totalDy = ev.clientY - pointerStart.y;
-    if(Math.hypot(totalDx, totalDy) < MOVE_THRESHOLD){
-      handleTapToggle(ev.clientX, ev.clientY);
-    }
-    pointerActive = false;
-    activePointerId = null;
-    pointerStart = null;
-    pointerLast = null;
-    isPanning = false;
-  }, {passive:false});
-
-  canvas.addEventListener('pointercancel', function(ev){
-    if(ev.pointerId !== activePointerId) return;
-    try{ ev.target.releasePointerCapture(ev.pointerId); } catch(e){}
-    pointerActive = false; activePointerId = null; pointerStart = null; pointerLast = null; isPanning = false;
-  }, {passive:false});
-
-  // touch pinch zoom and two-finger pan: handle via touch events
-  canvas.addEventListener('touchstart', function(e){
-    if(e.touches && e.touches.length === 2){
-      lastPinchDist = Math.hypot(
-        e.touches[0].clientX - e.touches[1].clientX,
-        e.touches[0].clientY - e.touches[1].clientY
-      );
-      lastPinchCenter = {
-        x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
-        y: (e.touches[0].clientY + e.touches[1].clientY) / 2
-      };
-    }
-  }, {passive:true});
-
-  canvas.addEventListener('touchmove', function(e){
-    if(e.touches && e.touches.length === 2){
-      e.preventDefault();
-      const t0 = e.touches[0], t1 = e.touches[1];
-      const cx = (t0.clientX + t1.clientX)/2, cy = (t0.clientY + t1.clientY)/2;
-      const dist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
-      if(lastPinchDist == null){
-        lastPinchDist = dist;
-        lastPinchCenter = { x: cx, y: cy };
-        return;
-      }
-      const factor = dist / lastPinchDist;
-      // zoom about pinch center
-      const before = clientToWorld(lastPinchCenter.x, lastPinchCenter.y);
-      scale *= factor; scale = Math.max(0.25, Math.min(6, scale));
-      const after = clientToWorld(lastPinchCenter.x, lastPinchCenter.y);
-      // adjust tx/ty so the same world point stays under the same screen pixel
-      tx += (after.x - before.x) * scale * dpr;
-      ty += (after.y - before.y) * scale * dpr;
-      // two-finger pan (if pinch center moved)
-      const moveX = cx - lastPinchCenter.x;
-      const moveY = cy - lastPinchCenter.y;
-      tx += moveX * dpr;
-      ty += moveY * dpr;
-      lastPinchDist = dist;
-      lastPinchCenter = { x: cx, y: cy };
-      draw();
-    }
-  }, {passive:false});
-
-  canvas.addEventListener('touchend', function(e){
-    if(e.touches && e.touches.length < 2){
-      lastPinchDist = null;
-      lastPinchCenter = null;
-    }
-  }, {passive:true});
-
-  // wheel zoom (desktop)
-  canvas.addEventListener('wheel', function(e){
-    e.preventDefault();
-    const delta = -e.deltaY;
-    const factor = delta > 0 ? 1.08 : 0.925;
-    const before = clientToWorld(e.clientX, e.clientY);
-    scale *= factor; scale = Math.max(0.25, Math.min(6, scale));
-    const after = clientToWorld(e.clientX, e.clientY);
-    tx += (after.x - before.x) * scale * dpr;
-    ty += (after.y - before.y) * scale * dpr;
-    draw();
-  }, {passive:false});
-
-  // double-tap to toggle zoom centered on touch
-  let lastTap = 0;
-  canvas.addEventListener('touchend', function(e){
-    const now = Date.now();
-    if(now - lastTap < 300 && e.changedTouches.length){
-      if(Math.abs(scale - 1) < 0.01){
-        scale = 2;
-      } else {
-        scale = 1; tx = 0; ty = 0;
-      }
-      draw();
-    }
-    lastTap = now;
-  }, {passive:true});
-
-  // prevent context menu
-  canvas.addEventListener('contextmenu', e => e.preventDefault());
-
-  // initial fit-to-screen & setup
-  function init(){
-    // compute initial scale to fit board to canvas rect
+  // Convert client coordinates to world coordinates
+  function clientToWorld(cx, cy) {
     const rect = canvas.getBoundingClientRect();
-    // handle case rect width/height might be 0 initially; use setTimeout fallback
-    const computeAndSetup = () => {
-      const r = canvas.getBoundingClientRect();
-      const fitScale = Math.min(r.width / viewW, r.height / viewH) * 0.96;
-      scale = Math.max(0.25, Math.min(6, fitScale));
-      tx = (r.width * dpr - viewW * scale * dpr) / 2;
-      ty = (r.height * dpr - viewH * scale * dpr) / 2;
-      resizeCanvas();
-      window.addEventListener('resize', resizeCanvas);
-      draw();
-    };
-    // sometimes getBoundingClientRect returns 0 if not yet laid out; guard
-    const r = canvas.getBoundingClientRect();
-    if(r.width <= 0 || r.height <= 0){
-      // try again shortly
-      setTimeout(computeAndSetup, 50);
+    const localX = (cx - rect.left);
+    const localY = (cy - rect.top);
+    return { x: localX + viewport.x, y: localY + viewport.y };
+  }
+
+  // Hit detection: find nearest edge (horizontal or vertical) to world point.
+  // Only accept if within hitRadius (fraction of spacing).
+  function findClosestEdge(worldX, worldY) {
+    const spacing = DOT_SPACING * scale;
+    // grid coordinates (floating)
+    const gx = worldX / spacing;
+    const gy = worldY / spacing;
+
+    // Candidate horizontal: find nearest grid row (r) and column (c..c+1)
+    const rNear = Math.round(gy);
+    const cFloor = Math.floor(gx);
+    let best = { type: null, r:0, c:0, dist: Infinity };
+
+    // horizontal edges exist for r in [0..ROWS-1], c in [0..COLS-2]
+    for (let dc = -1; dc <= 1; dc++) {
+      const c = cFloor + dc;
+      const r = rNear;
+      if (r < 0 || r >= ROWS) continue;
+      if (c < 0 || c >= COLS - 1) continue;
+      // midpoint of horizontal edge
+      const mx = (c + 0.5) * spacing;
+      const my = r * spacing;
+      const dx = worldX - mx;
+      const dy = worldY - my;
+      const d = Math.hypot(dx, dy);
+      if (d < best.dist) {
+        best = { type: 'h', r: r, c: c, dist: d };
+      }
+    }
+
+    // vertical candidates
+    const rFloor = Math.floor(gy);
+    const cNear = Math.round(gx);
+    for (let dr=-1; dr<=1; dr++) {
+      const r = rFloor + dr;
+      const c = cNear;
+      if (r < 0 || r >= ROWS - 1) continue;
+      if (c < 0 || c >= COLS) continue;
+      const mx = c * spacing;
+      const my = (r + 0.5) * spacing;
+      const dx = worldX - mx;
+      const dy = worldY - my;
+      const d = Math.hypot(dx, dy);
+      if (d < best.dist) {
+        best = { type: 'v', r: r, c: c, dist: d };
+      }
+    }
+
+    // Accept only if within hitRadius (we choose spacing * 0.4)
+    const hitRadius = Math.max(10, spacing * 0.4);
+    if (best.dist <= hitRadius) return best;
+    return null;
+  }
+
+  // Toggle edge: follow rules:
+  // - If there is already >=1 line on that edge, remove all (set 0) (user said remove if already a line)
+  // - Else if current < MAX_EDGE_COUNT, increment by 1
+  function toggleEdge(edge) {
+    if (!edge) return;
+    if (edge.type === 'h') {
+      const idx = edge.r * (COLS - 1) + edge.c;
+      const val = horizontalEdges[idx];
+      if (val >= 1) {
+        horizontalEdges[idx] = 0;
+      } else {
+        if (val < MAX_EDGE_COUNT) horizontalEdges[idx] = val + 1;
+      }
+    } else if (edge.type === 'v') {
+      const idx = edge.r * COLS + edge.c;
+      const val = verticalEdges[idx];
+      if (val >= 1) {
+        verticalEdges[idx] = 0;
+      } else {
+        if (val < MAX_EDGE_COUNT) verticalEdges[idx] = val + 1;
+      }
+    }
+    requestRender();
+  }
+
+  // Initialize viewport to center on grid with zoomed-in spacing
+  function initViewport() {
+    fitCanvas();
+    scale = 1.0;
+    zoomedOut = false;
+    const spacing = DOT_SPACING * scale;
+    const gsize = gridPixelSize(spacing);
+    // center default view on center of grid
+    viewport.x = Math.max(0, (gsize.width - viewport.width) / 2);
+    viewport.y = Math.max(0, (gsize.height - viewport.height) / 2);
+    requestRender();
+  }
+
+  // Toggle zoom: if currently zoomed out show full grid fit-to-screen; else zoom in centering at worldCenter (optional)
+  function toggleZoom(worldCenter) {
+    const spacingIn = DOT_SPACING;
+    if (!zoomedOut) {
+      // zoom out: compute scale s.t. whole grid fits in viewport
+      const grid = gridPixelSize(spacingIn);
+      const sx = viewport.width / grid.width;
+      const sy = viewport.height / grid.height;
+      const s = Math.min(sx, sy, 1.0);
+      scale = s;
+      zoomedOut = true;
+      // fit to center
+      const gW = grid.width * scale;
+      const gH = grid.height * scale;
+      viewport.x = Math.max(0, (gW - viewport.width) / 2);
+      viewport.y = Math.max(0, (gH - viewport.height) / 2);
+      requestRender();
     } else {
-      computeAndSetup();
+      // zoom in: restore scale and center on worldCenter if provided
+      scale = 1.0;
+      zoomedOut = false;
+      const spacing = DOT_SPACING * scale;
+      const grid = gridPixelSize(spacing);
+      if (worldCenter) {
+        // compute new viewport to center on the tapped world coordinate
+        const centerX = worldCenter.x;
+        const centerY = worldCenter.y;
+        viewport.x = Math.min(Math.max(0, centerX - viewport.width / 2), Math.max(0, grid.width - viewport.width));
+        viewport.y = Math.min(Math.max(0, centerY - viewport.height / 2), Math.max(0, grid.height - viewport.height));
+      } else {
+        // keep similar center
+        const gridOld = gridPixelSize(spacing * scale);
+        viewport.x = Math.max(0, (grid.width - viewport.width) / 2);
+        viewport.y = Math.max(0, (grid.height - viewport.height) / 2);
+      }
+      requestRender();
     }
   }
 
-  init();
+  // Input handling: pointer events to support mouse & touch
+  let isDragging = false;
+  let lastPointer = null;
+  let dragStart = null;
+  let pointerMovedSinceDown = false;
+
+  // Double-tap detection
+  let lastTapTime = 0;
+  let lastTapPos = null;
+  const DOUBLE_TAP_DELAY = 300;
+
+  canvas.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    canvas.setPointerCapture(ev.pointerId);
+    lastPointer = { id: ev.pointerId, x: ev.clientX, y: ev.clientY };
+    dragStart = { x: ev.clientX, y: ev.clientY, vx: viewport.x, vy: viewport.y };
+    pointerMovedSinceDown = false;
+    isDragging = true;
+  });
+
+  canvas.addEventListener('pointermove', (ev) => {
+    if (!isDragging || ev.pointerId !== lastPointer.id) return;
+    const dx = ev.clientX - dragStart.x;
+    const dy = ev.clientY - dragStart.y;
+    // if movement is substantial, interpret as pan
+    if (Math.hypot(dx, dy) > 4) {
+      pointerMovedSinceDown = true;
+      viewport.x = Math.max(0, dragStart.vx - dx);
+      viewport.y = Math.max(0, dragStart.vy - dy);
+      // clamp to grid size
+      const spacing = DOT_SPACING * scale;
+      const gsize = gridPixelSize(spacing);
+      viewport.x = Math.min(viewport.x, Math.max(0, gsize.width - viewport.width));
+      viewport.y = Math.min(viewport.y, Math.max(0, gsize.height - viewport.height));
+      requestRender();
+    }
+    lastPointer.x = ev.clientX;
+    lastPointer.y = ev.clientY;
+  });
+
+  canvas.addEventListener('pointerup', (ev) => {
+    if (!lastPointer || ev.pointerId !== lastPointer.id) return;
+    canvas.releasePointerCapture(ev.pointerId);
+    isDragging = false;
+
+    const upX = ev.clientX;
+    const upY = ev.clientY;
+    const timeNow = performance.now();
+
+    // Double-tap detection: compare with lastTapTime/pos
+    const isDoubleTap = (timeNow - lastTapTime) <= DOUBLE_TAP_DELAY &&
+                        lastTapPos && Math.hypot(upX - lastTapPos.x, upY - lastTapPos.y) < 40;
+
+    if (!pointerMovedSinceDown) {
+      // treat as tap
+      const world = clientToWorld(upX, upY);
+      if (isDoubleTap) {
+        // toggle zoom: if currently zoomed out, zoom in centered on tapped region in overview
+        toggleZoom(world);
+        lastTapTime = 0;
+        lastTapPos = null;
+        return;
+      } else {
+        // Single tap: find edge and toggle
+        const edge = findClosestEdge(world.x, world.y);
+        if (edge) {
+          toggleEdge(edge);
+        }
+        // record for potential double-tap
+        lastTapTime = timeNow;
+        lastTapPos = { x: upX, y: upY };
+      }
+    } else {
+      // ended a pan
+    }
+  });
+
+  // Prevent double pointer issues
+  canvas.addEventListener('pointercancel', (ev) => {
+    if (lastPointer && ev.pointerId === lastPointer.id) {
+      isDragging = false;
+      lastPointer = null;
+    }
+  });
+
+  // Prevent context menu on long press
+  canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
+
+  // Initialize and start
+  initViewport();
+  requestRender();
+
+  // expose minimal debug helpers to console
+  window.slitherlink = {
+    toggleZoom: () => toggleZoom(),
+    stateSummary: () => {
+      // return counts for debugging
+      let h = 0, v = 0;
+      for (let i=0;i<horizontalEdges.length;i++) if (horizontalEdges[i]) h++;
+      for (let i=0;i<verticalEdges.length;i++) if (verticalEdges[i]) v++;
+      return { horiz: h, vert: v, total: h+v };
+    }
+  };
 
 })();
 </script>
@@ -371,5 +445,4 @@ HTML = """
 </html>
 """
 
-html_code = HTML.replace("__ROWS__", str(ROWS)).replace("__COLS__", str(COLS)).replace("__CELL__", str(CELL_PX))
-html(html_code, height=IFRAME_HEIGHT, scrolling=True)
+st.components.v1.html(html, height=800, scrolling=False)
