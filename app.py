@@ -1,479 +1,472 @@
-import streamlit as st
+# app.py
+# Streamlit app embedding a fully client-side Slitherlink UI in an HTML/JS canvas.
+# Usage: pip install streamlit
+# then: streamlit run app.py
 
-st.set_page_config(page_title="Slitherlink (128×178) — Minimap", layout="wide")
+import streamlit as st
+from streamlit.components.v1 import html
+
+st.set_page_config(layout="wide")
+
 st.markdown(
     """
-Single large Slitherlink puzzle (128 × 178).  
-Controls:
-- Single tap/click: toggle an edge (add if none, remove if present).  
-- Drag (touch or mouse): pan/scroll the large puzzle.  
-- Minimap (bottom-right) shows the entire puzzle with a rectangle for the currently visible segment. Tap/click the minimap to recenter the main view.
+## Slitherlink — Zoomed Editing + Mini-map
+
+Left: controls (simple). The main interactive UI is the embedded canvas below.
 """
 )
 
-html = r"""
+html_code = r"""
 <!doctype html>
 <html>
 <head>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slitherlink Zoom + Minimap</title>
 <style>
-  html,body { height:100%; margin:0; background:#111; color:#ddd; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; -ms-touch-action: none; touch-action: none; }
-  #container { height:88vh; display:flex; align-items:center; justify-content:center; }
-  canvas { background: #0b0b0b; touch-action: none; border-radius:8px; box-shadow: 0 6px 18px rgba(0,0,0,0.6); }
-  .info { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; font-size:12px; color:#bbb; padding:8px 12px; }
+  html,body { height:100%; margin:0; font-family: Arial, sans-serif; }
+  #container { position:relative; height:80vh; width:100%; background:#fafafa; overflow:hidden; }
+  #mainCanvas { background: #ffffff; display:block; margin:0; }
+  #minimap { position:absolute; bottom:20px; right:20px; background:#fff; border:1px solid #aaa; box-shadow:0 2px 8px rgba(0,0,0,0.15); }
+  /* HUD text */
+  #hud { position:absolute; left:12px; top:12px; background:rgba(255,255,255,0.8); padding:6px 8px; border-radius:6px; border:1px solid #ccc; font-size:13px; }
+  .btn { padding:6px 8px; border-radius:4px; border:1px solid #888; background:#eee; cursor:pointer; display:inline-block; margin-right:6px; }
 </style>
 </head>
 <body>
 <div id="container">
-  <canvas id="c"></canvas>
+  <div id="hud">
+    <span class="btn" id="zoomInBtn">Zoom In</span>
+    <span class="btn" id="zoomOutBtn">Zoom Out</span>
+    <span class="btn" id="resetBtn">Reset</span>
+    <span style="margin-left:8px">Mode: click to toggle edge (degree ≤ 2)</span>
+  </div>
+  <canvas id="mainCanvas"></canvas>
+  <canvas id="minimap" width="300" height="230"></canvas>
 </div>
-<div class="info">128 × 178 dots. Tap between dots to toggle an edge. Drag to pan. Use the minimap to orient or jump.</div>
 
 <script>
+/*
+Client-side Slitherlink interactive canvas.
+- Grid: cols x rows dots (128 x 178).
+- Mini-map bottom-right shows full grid with a rectangle indicating current zoom/viewport.
+- Click minimap to center zoom viewport on that region.
+- Click zoomed area to toggle an edge (add or remove).
+- Degree constraint: a node may have at most 2 edges connected. Add only if both endpoints currently have <2 edges.
+- Lines render in both views simultaneously.
+*/
+
 (() => {
-  // Grid
-  const COLS = 128;
-  const ROWS = 178;
+  // CONFIG
+  const COLS = 128; // horizontal dots
+  const ROWS = 178; // vertical dots
+  const DOT_SPACING = 9; // px between adjacent dots in the full-space (mini map scales)
+  const DOT_RADIUS = 1.0;
+  const EDGE_HIT_RADIUS = 10; // pixels in zoom space for clicking an edge midpoint
+  const MIN_ZOOM = 0.6; // smaller = more zoomed out
+  const MAX_ZOOM = 6.0;
+  const INITIAL_ZOOM = 3.2; // starting zoom
+  const VIEWPORT_MARGIN = 40; // when centering, keep small margin
 
-  // Edge storage
-  const horizontalEdges = new Uint8Array(ROWS * Math.max(0, COLS - 1));
-  const verticalEdges = new Uint8Array(Math.max(0, ROWS - 1) * COLS);
+  // compute full logical size
+  const fullWidth = (COLS - 1) * DOT_SPACING;
+  const fullHeight = (ROWS - 1) * DOT_SPACING;
 
-  // Canvas
-  const canvas = document.getElementById('c');
-  const ctx = canvas.getContext('2d', {alpha:false});
+  // DOM
+  const mainC = document.getElementById('mainCanvas');
+  const miniC = document.getElementById('minimap');
+  const zoomInBtn = document.getElementById('zoomInBtn');
+  const zoomOutBtn = document.getElementById('zoomOutBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const container = document.getElementById('container');
 
-  // Visual params (no zoom; fixed scale)
-  const DOT_SPACING = 28;    // pixels between dots in main view
-  const DOT_RADIUS = 2.0;
-  const EDGE_WIDTH = 4.0;
-  const MAX_EDGE_COUNT = 2;
+  const mc = mainC.getContext('2d', { alpha: false });
+  const mm = miniC.getContext('2d');
 
-  // Viewport (world pixels)
-  let viewport = { x: 0, y: 0, width: 0, height: 0 };
+  // State (client-side)
+  let zoom = INITIAL_ZOOM;
+  let viewport = { cx: fullWidth/2, cy: fullHeight/2, w: 800/zoom, h: 600/zoom }; // center coords in full-space
+  // Adjust viewport size dynamically based on main canvas size later.
 
-  // Device pixel ratio
-  const DPR = Math.max(1, window.devicePixelRatio || 1);
+  // store edges as keys "x1,y1|x2,y2" where coords are integer grid indices
+  const edges = new Map(); // key => true (present)
+  // degree counts per node as 'x,y' => count
+  const degree = new Map();
 
-  function gridPixelSize(spacing) {
-    return { width: (COLS - 1) * spacing, height: (ROWS - 1) * spacing };
+  // Helper functions for keys
+  function nodeKey(ix, iy) { return `${ix},${iy}`; }
+  function edgeKey(a,b) {
+    // order canonical: smaller lexicographically first
+    const ka = `${a.x},${a.y}`, kb = `${b.x},${b.y}`;
+    return ka < kb ? ka + '|' + kb : kb + '|' + ka;
   }
 
-  function fitCanvas() {
-    const rect = document.getElementById('container').getBoundingClientRect();
-    const cw = Math.max(320, rect.width - 24);
-    const ch = Math.max(320, rect.height - 24);
-    canvas.style.width = cw + 'px';
-    canvas.style.height = ch + 'px';
-    canvas.width = Math.round(cw * DPR);
-    canvas.height = Math.round(ch * DPR);
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    viewport.width = canvas.clientWidth;
-    viewport.height = canvas.clientHeight;
+  function addEdge(a,b) {
+    const key = edgeKey(a,b);
+    if (edges.has(key)) return false;
+    // degree check
+    const da = degree.get(nodeKey(a.x,a.y)) || 0;
+    const db = degree.get(nodeKey(b.x,b.y)) || 0;
+    if (da >= 2 || db >= 2) return false;
+    edges.set(key, true);
+    degree.set(nodeKey(a.x,a.y), da+1);
+    degree.set(nodeKey(b.x,b.y), db+1);
+    return true;
+  }
+  function removeEdge(a,b) {
+    const key = edgeKey(a,b);
+    if (!edges.has(key)) return false;
+    edges.delete(key);
+    const ka = nodeKey(a.x,a.y), kb = nodeKey(b.x,b.y);
+    degree.set(ka, (degree.get(ka)||1)-1);
+    degree.set(kb, (degree.get(kb)||1)-1);
+    return true;
   }
 
-  window.addEventListener('resize', () => { fitCanvas(); requestRender(); });
-
-  // Render scheduling
-  let pendingRender = false;
-  function requestRender() {
-    if (!pendingRender) {
-      pendingRender = true;
-      window.requestAnimationFrame(() => { pendingRender = false; render(); });
-    }
+  // Convert between full-space (unscaled grid px) and viewport (what user sees in main canvas)
+  function fullToScreen(fullX, fullY, canvasW, canvasH) {
+    // map full-space to viewport-space then to canvas pixels
+    const left = viewport.cx - viewport.w/2;
+    const top  = viewport.cy - viewport.h/2;
+    const vx = (fullX - left) / viewport.w * canvasW;
+    const vy = (fullY - top)  / viewport.h * canvasH;
+    return { x: vx, y: vy };
+  }
+  function screenToFull(sx, sy, canvasW, canvasH) {
+    const left = viewport.cx - viewport.w/2;
+    const top  = viewport.cy - viewport.h/2;
+    const fx = left + (sx / canvasW) * viewport.w;
+    const fy = top  + (sy / canvasH) * viewport.h;
+    return { x: fx, y: fy };
   }
 
-  // Minimap parameters
-  const MINIMAP_MAX_W = 220; // px
-  const MINIMAP_MAX_H = 220; // px
-  const MINIMAP_PADDING = 12; // px from canvas edges
-  const MINIMAP_BG = 'rgba(12,12,12,0.9)';
-  const MINIMAP_EDGE_COLOR = 'rgba(0,208,255,0.75)';
-  const MINIMAP_VIEWPORT_COLOR = 'rgba(255,255,255,0.9)';
-  const MINIMAP_BORDER = 'rgba(255,255,255,0.08)';
+  // Find nearest edge (horizontal or vertical) to a given full-space point.
+  // We'll compute nearest grid indices by rounding coordinates.
+  function findNearestEdgeToFull(fullX, fullY) {
+    // convert full coords to grid index float
+    const gx = fullX / DOT_SPACING;
+    const gy = fullY / DOT_SPACING;
+    // candidate edges near rounded indices
+    const ix = Math.round(gx);
+    const iy = Math.round(gy);
 
-  function render() {
-    // clear background
-    ctx.fillStyle = '#0b0b0b';
-    ctx.fillRect(0,0,canvas.clientWidth, canvas.clientHeight);
-
-    const spacing = DOT_SPACING;
-    const grid = gridPixelSize(spacing);
-
-    // clamp viewport to grid
-    viewport.x = Math.max(0, Math.min(viewport.x, Math.max(0, grid.width - viewport.width)));
-    viewport.y = Math.max(0, Math.min(viewport.y, Math.max(0, grid.height - viewport.height)));
-
-    // visible bounds (world)
-    const x0 = viewport.x;
-    const y0 = viewport.y;
-    const x1 = viewport.x + viewport.width;
-    const y1 = viewport.y + viewport.height;
-
-    // draw edges (only visible region)
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-
-    // Horizontal edges
-    const hCols = COLS - 1;
-    for (let r=0; r<ROWS; r++) {
-      const ry = r * spacing;
-      if (ry + DOT_RADIUS < y0 - spacing || ry - DOT_RADIUS > y1 + spacing) continue;
-      for (let c=0; c<hCols; c++) {
-        const idx = r * hCols + c;
-        const val = horizontalEdges[idx];
-        if (val === 0) continue;
-        const xstart = c * spacing;
-        const xend = (c+1) * spacing;
-        if (xend < x0 - spacing || xstart > x1 + spacing) continue;
-        ctx.strokeStyle = '#00d0ff';
-        ctx.lineWidth = EDGE_WIDTH;
-        ctx.beginPath();
-        ctx.moveTo(xstart - viewport.x, ry - viewport.y);
-        ctx.lineTo(xend - viewport.x, ry - viewport.y);
-        ctx.stroke();
-
-        if (val === 2) {
-          ctx.strokeStyle = '#0090a0';
-          ctx.lineWidth = EDGE_WIDTH - 1.6;
-          ctx.beginPath();
-          ctx.moveTo(xstart - viewport.x, ry - viewport.y - 3);
-          ctx.lineTo(xend - viewport.x, ry - viewport.y - 3);
-          ctx.stroke();
+    let best = { dist: Infinity, a: null, b: null };
+    // search neighborhood of small radius (2)
+    for (let dx=-2; dx<=2; dx++) {
+      for (let dy=-2; dy<=2; dy++) {
+        const nx = ix+dx, ny = iy+dy;
+        // horizontal edge (nx,ny) <-> (nx+1,ny)
+        if (nx >= 0 && nx+1 < COLS && ny >= 0 && ny < ROWS) {
+          const ax = nx * DOT_SPACING, ay = ny * DOT_SPACING;
+          const bx = (nx+1) * DOT_SPACING, by = ny * DOT_SPACING;
+          const mx = 0.5*(ax+bx), my = 0.5*(ay+by);
+          const d2 = (mx-fullX)*(mx-fullX) + (my-fullY)*(my-fullY);
+          if (d2 < best.dist) {
+            best = { dist: d2, a: {x:nx,y:ny}, b: {x:nx+1,y:ny} };
+          }
+        }
+        // vertical edge (nx,ny) <-> (nx,ny+1)
+        if (nx >= 0 && nx < COLS && ny >= 0 && ny+1 < ROWS) {
+          const ax = nx * DOT_SPACING, ay = ny * DOT_SPACING;
+          const bx = nx * DOT_SPACING, by = (ny+1) * DOT_SPACING;
+          const mx = 0.5*(ax+bx), my = 0.5*(ay+by);
+          const d2 = (mx-fullX)*(mx-fullX) + (my-fullY)*(my-fullY);
+          if (d2 < best.dist) {
+            best = { dist: d2, a: {x:nx,y:ny}, b: {x:nx,y:ny+1} };
+          }
         }
       }
     }
+    return best; // dist is squared distance in full-space pixels
+  }
 
-    // Vertical edges
-    const vRows = ROWS - 1;
-    for (let r=0; r<vRows; r++) {
-      const baseY = r * spacing;
-      if (baseY + spacing + DOT_RADIUS < y0 - spacing || baseY - DOT_RADIUS > y1 + spacing) continue;
-      for (let c=0; c<COLS; c++) {
-        const idx = r * COLS + c;
-        const val = verticalEdges[idx];
-        if (val === 0) continue;
-        const x = c * spacing;
-        const ystart = baseY;
-        const yend = baseY + spacing;
-        if (x + DOT_RADIUS < x0 - spacing || x - DOT_RADIUS > x1 + spacing) continue;
-        ctx.strokeStyle = '#00d0ff';
-        ctx.lineWidth = EDGE_WIDTH;
-        ctx.beginPath();
-        ctx.moveTo(x - viewport.x, ystart - viewport.y);
-        ctx.lineTo(x - viewport.x, yend - viewport.y);
-        ctx.stroke();
+  // Rendering
+  function resizeMainCanvas() {
+    const rect = container.getBoundingClientRect();
+    // Choose main canvas size to fill container
+    mainC.width = Math.max(400, Math.floor(rect.width));
+    mainC.height = Math.max(400, Math.floor(rect.height));
+    // update viewport size in full-space based on zoom and canvas pixel size
+    viewport.w = mainC.width / zoom;
+    viewport.h = mainC.height / zoom;
+  }
 
-        if (val === 2) {
-          ctx.strokeStyle = '#0090a0';
-          ctx.lineWidth = EDGE_WIDTH - 1.6;
-          ctx.beginPath();
-          ctx.moveTo(x - viewport.x + 3, ystart - viewport.y);
-          ctx.lineTo(x - viewport.x + 3, yend - viewport.y);
-          ctx.stroke();
-        }
+  function draw() {
+    // draw main canvas (zoomed-in)
+    mc.clearRect(0,0, mainC.width, mainC.height);
+    mc.fillStyle = '#fff';
+    mc.fillRect(0,0, mainC.width, mainC.height);
+
+    // draw grid dots faintly
+    const lowAlpha = 0.06;
+    mc.fillStyle = `rgba(0,0,0,${lowAlpha})`;
+
+    // Determine visible grid index range to only draw what's necessary
+    const left = viewport.cx - viewport.w/2;
+    const top  = viewport.cy - viewport.h/2;
+    const right = left + viewport.w;
+    const bottom = top + viewport.h;
+    const minI = Math.max(0, Math.floor(left / DOT_SPACING) - 1);
+    const maxI = Math.min(COLS-1, Math.ceil(right / DOT_SPACING) + 1);
+    const minJ = Math.max(0, Math.floor(top  / DOT_SPACING) - 1);
+    const maxJ = Math.min(ROWS-1, Math.ceil(bottom / DOT_SPACING) + 1);
+
+    for (let j=minJ; j<=maxJ; j++) {
+      for (let i=minI; i<=maxI; i++) {
+        const fx = i*DOT_SPACING, fy = j*DOT_SPACING;
+        const p = fullToScreen(fx, fy, mainC.width, mainC.height);
+        // Skip if out of canvas bounds
+        if (p.x < -2 || p.x > mainC.width+2 || p.y < -2 || p.y > mainC.height+2) continue;
+        mc.beginPath();
+        mc.arc(p.x, p.y, Math.max(0.6, DOT_RADIUS * zoom/2), 0, Math.PI*2);
+        mc.fill();
       }
     }
 
-    // draw dots (visible)
-    ctx.fillStyle = '#e6e6e6';
-    const rStart = Math.max(0, Math.floor((y0 - DOT_RADIUS) / spacing));
-    const rEnd = Math.min(ROWS - 1, Math.ceil((y1 + DOT_RADIUS) / spacing));
-    const cStart = Math.max(0, Math.floor((x0 - DOT_RADIUS) / spacing));
-    const cEnd = Math.min(COLS - 1, Math.ceil((x1 + DOT_RADIUS) / spacing));
-    for (let r=rStart; r<=rEnd; r++) {
-      const ry = r * spacing - viewport.y;
-      for (let c=cStart; c<=cEnd; c++) {
-        const rx = c * spacing - viewport.x;
-        ctx.beginPath();
-        ctx.arc(rx, ry, DOT_RADIUS, 0, Math.PI*2);
-        ctx.fill();
+    // Draw edges (present)
+    mc.lineWidth = Math.max(1, Math.min(3, zoom*0.9));
+    mc.strokeStyle = '#0b4da2';
+    mc.lineCap = 'round';
+    mc.beginPath();
+    edges.forEach((v, k) => {
+      const [n1,n2] = k.split('|');
+      const [i1,j1] = n1.split(',').map(Number);
+      const [i2,j2] = n2.split(',').map(Number);
+      const p1 = fullToScreen(i1*DOT_SPACING, j1*DOT_SPACING, mainC.width, mainC.height);
+      const p2 = fullToScreen(i2*DOT_SPACING, j2*DOT_SPACING, mainC.width, mainC.height);
+      mc.moveTo(p1.x, p1.y);
+      mc.lineTo(p2.x, p2.y);
+    });
+    mc.stroke();
+
+    // Optionally draw ghost nearest edge under mouse? (omitted)
+
+    // Draw minimap
+    drawMinimap();
+  }
+
+  function drawMinimap() {
+    const mw = miniC.width, mh = miniC.height;
+    mm.clearRect(0,0,mw,mh);
+    mm.fillStyle = '#fff';
+    mm.fillRect(0,0,mw,mh);
+
+    // compute scale to fit fullWidth/fullHeight into minimap with padding
+    const pad = 8;
+    const availW = mw - pad*2, availH = mh - pad*2;
+    const scale = Math.min(availW / fullWidth, availH / fullHeight);
+    const offX = (mw - fullWidth*scale)/2;
+    const offY = (mh - fullHeight*scale)/2;
+
+    // draw faint dots as tiny pixels for performance: draw as thin grid lines every N
+    // But we'll draw edges and a few grid dots
+    mm.fillStyle = '#dcdcdc';
+    const dotStep = 8; // only show a subset to avoid clutter
+    for (let j=0; j<ROWS; j+=dotStep) {
+      for (let i=0; i<COLS; i+=dotStep) {
+        const x = offX + i*DOT_SPACING*scale;
+        const y = offY + j*DOT_SPACING*scale;
+        mm.fillRect(x-0.4, y-0.4, 0.8, 0.8);
       }
     }
 
-    // ---------- draw minimap ----------
-    // compute minimap size keeping aspect ratio
-    const maxW = MINIMAP_MAX_W;
-    const maxH = MINIMAP_MAX_H;
-    const scaleX = maxW / grid.width;
-    const scaleY = maxH / grid.height;
-    const miniScale = Math.min(scaleX, scaleY, 1.0);
-    const miniW = Math.round(grid.width * miniScale);
-    const miniH = Math.round(grid.height * miniScale);
+    // draw edges present
+    mm.strokeStyle = '#0b4da2';
+    mm.lineWidth = 1;
+    mm.beginPath();
+    edges.forEach((v, k) => {
+      const [n1,n2] = k.split('|');
+      const [i1,j1] = n1.split(',').map(Number);
+      const [i2,j2] = n2.split(',').map(Number);
+      const x1 = offX + i1*DOT_SPACING*scale, y1 = offY + j1*DOT_SPACING*scale;
+      const x2 = offX + i2*DOT_SPACING*scale, y2 = offY + j2*DOT_SPACING*scale;
+      mm.moveTo(x1, y1); mm.lineTo(x2, y2);
+    });
+    mm.stroke();
 
-    const miniX = canvas.clientWidth - MINIMAP_PADDING - miniW;
-    const miniY = canvas.clientHeight - MINIMAP_PADDING - miniH;
+    // draw viewport rectangle
+    mm.strokeStyle = '#e85a5a';
+    mm.lineWidth = 2;
+    mm.setLineDash([4,3]);
+    const vx = (viewport.cx - viewport.w/2) * scale + offX;
+    const vy = (viewport.cy - viewport.h/2) * scale + offY;
+    const vw = viewport.w * scale;
+    const vh = viewport.h * scale;
+    mm.strokeRect(vx, vy, vw, vh);
+    mm.setLineDash([]);
+  }
 
-    // background
-    ctx.fillStyle = MINIMAP_BG;
-    ctx.fillRect(miniX - 2, miniY - 2, miniW + 4, miniH + 4);
-
-    // draw simplified edges on minimap (sampled to keep it fast)
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(miniX, miniY, miniW, miniH);
-    ctx.clip();
-
-    // scale and translate to minimap origin
-    ctx.translate(miniX, miniY);
-    ctx.scale(miniScale, miniScale);
-
-    // draw edges (use thin lines)
-    ctx.lineWidth = Math.max(1 / miniScale, 0.8);
-    ctx.strokeStyle = MINIMAP_EDGE_COLOR;
-
-    // horizontal
-    for (let r=0; r<ROWS; r++) {
-      const hC = COLS - 1;
-      const ry = r * spacing;
-      for (let c=0; c<hC; c++) {
-        const idx = r * hC + c;
-        const val = horizontalEdges[idx];
-        if (!val) continue;
-        ctx.beginPath();
-        ctx.moveTo(c * spacing, ry);
-        ctx.lineTo((c+1) * spacing, ry);
-        ctx.stroke();
-      }
+  // Event handlers
+  function handleMainClick(ev) {
+    const rect = mainC.getBoundingClientRect();
+    const sx = ev.clientX - rect.left;
+    const sy = ev.clientY - rect.top;
+    const full = screenToFull(sx, sy, mainC.width, mainC.height);
+    // find nearest edge
+    const nearest = findNearestEdgeToFull(full.x, full.y);
+    if (!nearest || nearest.dist === Infinity) return;
+    // Check threshold: distance in screen pixels should be <= EDGE_HIT_RADIUS
+    const midpointFullX = 0.5 * ((nearest.a.x + nearest.b.x) * DOT_SPACING);
+    const midpointFullY = 0.5 * ((nearest.a.y + nearest.b.y) * DOT_SPACING);
+    const screenMid = fullToScreen(midpointFullX, midpointFullY, mainC.width, mainC.height);
+    const dx = screenMid.x - sx, dy = screenMid.y - sy;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if (dist > EDGE_HIT_RADIUS) {
+      // ignore if too far from an edge midpoint
+      return;
     }
-    // vertical
-    for (let r=0; r<ROWS-1; r++) {
-      const baseY = r * spacing;
-      for (let c=0; c<COLS; c++) {
-        const idx = r * COLS + c;
-        const val = verticalEdges[idx];
-        if (!val) continue;
-        ctx.beginPath();
-        ctx.moveTo(c * spacing, baseY);
-        ctx.lineTo(c * spacing, baseY + spacing);
-        ctx.stroke();
-      }
+    // toggle edge
+    const key = edgeKey(nearest.a, nearest.b);
+    if (edges.has(key)) {
+      removeEdge(nearest.a, nearest.b);
+    } else {
+      addEdge(nearest.a, nearest.b);
     }
+    draw();
+  }
 
-    // restore transform
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  function handleMiniClick(ev) {
+    const rect = miniC.getBoundingClientRect();
+    const sx = ev.clientX - rect.left;
+    const sy = ev.clientY - rect.top;
+    // compute map scale & offsets same as drawMinimap
+    const mw = miniC.width, mh = miniC.height;
+    const pad = 8;
+    const availW = mw - pad*2, availH = mh - pad*2;
+    const scale = Math.min(availW / fullWidth, availH / fullHeight);
+    const offX = (mw - fullWidth*scale)/2;
+    const offY = (mh - fullHeight*scale)/2;
+    // map click to full-space coords
+    const fx = (sx - offX) / scale;
+    const fy = (sy - offY) / scale;
+    // clamp center so viewport stays inside
+    const halfW = viewport.w/2, halfH = viewport.h/2;
+    const cx = Math.max(halfW, Math.min(fullWidth - halfW, fx));
+    const cy = Math.max(halfH, Math.min(fullHeight - halfH, fy));
+    viewport.cx = cx; viewport.cy = cy;
+    draw();
+  }
 
-    // draw border for minimap
-    ctx.strokeStyle = MINIMAP_BORDER;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(miniX - 1, miniY - 1, miniW + 2, miniH + 2);
+  // Zoom controls
+  function setZoom(newZoom, centerFull=null) {
+    // Keep viewport center or set to provided center (full-space coords)
+    const oldCenter = { cx: viewport.cx, cy: viewport.cy };
+    zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
+    viewport.w = mainC.width / zoom;
+    viewport.h = mainC.height / zoom;
+    if (centerFull) {
+      viewport.cx = centerFull.x;
+      viewport.cy = centerFull.y;
+    } else {
+      // try keep same center but ensure within bounds
+      viewport.cx = Math.max(viewport.w/2, Math.min(fullWidth - viewport.w/2, oldCenter.cx));
+      viewport.cy = Math.max(viewport.h/2, Math.min(fullHeight - viewport.h/2, oldCenter.cy));
+    }
+    draw();
+  }
 
-    // draw viewport rectangle on minimap (in screen coordinates)
-    const viewRectX = miniX + Math.round((viewport.x / grid.width) * miniW);
-    const viewRectY = miniY + Math.round((viewport.y / grid.height) * miniH);
-    const viewRectW = Math.max(4, Math.round((viewport.width / grid.width) * miniW));
-    const viewRectH = Math.max(4, Math.round((viewport.height / grid.height) * miniH));
+  function recenterOnFullPoint(fullX, fullY) {
+    const halfW = viewport.w/2, halfH = viewport.h/2;
+    viewport.cx = Math.max(halfW, Math.min(fullWidth - halfW, fullX));
+    viewport.cy = Math.max(halfH, Math.min(fullHeight - halfH, fullY));
+  }
 
-    ctx.strokeStyle = MINIMAP_VIEWPORT_COLOR;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(viewRectX + 0.5, viewRectY + 0.5, viewRectW, viewRectH);
-
-    // draw a subtle fill for the viewport rect
-    ctx.fillStyle = 'rgba(255,255,255,0.06)';
-    ctx.fillRect(viewRectX + 1, viewRectY + 1, viewRectW - 2, viewRectH - 2);
-
-    // store minimap metrics for hit testing
-    minimapState.x = miniX;
-    minimapState.y = miniY;
-    minimapState.w = miniW;
-    minimapState.h = miniH;
-    minimapState.scale = miniScale;
-    minimapState.gridW = grid.width;
-    minimapState.gridH = grid.height;
-
-  } // end render
-
-  // minimap state for hit testing
-  const minimapState = { x:0, y:0, w:0, h:0, scale:1, gridW:0, gridH:0 };
-
-  // Input handling: panning + tapping for edges; minimap click to recenter
-  let isDragging = false;
-  let lastPointer = null;
-  let dragStart = null;
-  let pointerMovedSinceDown = false;
-  const MOVE_THRESHOLD = 6; // px
-
-  canvas.addEventListener('pointerdown', (ev) => {
-    ev.preventDefault();
-    canvas.setPointerCapture(ev.pointerId);
-    lastPointer = { id: ev.pointerId, x: ev.clientX, y: ev.clientY };
-    dragStart = { x: ev.clientX, y: ev.clientY, vx: viewport.x, vy: viewport.y };
-    pointerMovedSinceDown = false;
-    isDragging = true;
+  // Resize handling
+  window.addEventListener('resize', () => {
+    resizeMainCanvas();
+    // ensure viewport fits within full bounds
+    viewport.w = mainC.width / zoom;
+    viewport.h = mainC.height / zoom;
+    viewport.cx = Math.max(viewport.w/2, Math.min(fullWidth - viewport.w/2, viewport.cx));
+    viewport.cy = Math.max(viewport.h/2, Math.min(fullHeight - viewport.h/2, viewport.cy));
+    draw();
   });
 
-  canvas.addEventListener('pointermove', (ev) => {
-    if (!isDragging || ev.pointerId !== lastPointer.id) return;
-    const dx = ev.clientX - dragStart.x;
-    const dy = ev.clientY - dragStart.y;
-    if (Math.hypot(dx, dy) > MOVE_THRESHOLD) {
-      pointerMovedSinceDown = true;
-      viewport.x = Math.max(0, dragStart.vx - dx);
-      viewport.y = Math.max(0, dragStart.vy - dy);
-      // clamp
-      const grid = gridPixelSize(DOT_SPACING);
-      viewport.x = Math.min(viewport.x, Math.max(0, grid.width - viewport.width));
-      viewport.y = Math.min(viewport.y, Math.max(0, grid.height - viewport.height));
-      requestRender();
-    }
-    lastPointer.x = ev.clientX;
-    lastPointer.y = ev.clientY;
-  });
-
-canvas.addEventListener('pointerup', (ev) => {
-  if (!lastPointer || ev.pointerId !== lastPointer.id) return;
-  canvas.releasePointerCapture(ev.pointerId);
-  isDragging = false;
-
-  const upX = ev.clientX;
-  const upY = ev.clientY;
-
-  // If click/tap inside minimap, recentre main view AND toggle the nearest edge there
-  if (pointInMinimap(upX, upY)) {
-    const wx = minimapToWorldX(upX);
-    const wy = minimapToWorldY(upY);
-
-    // center viewport on this world point
-    const grid = gridPixelSize(DOT_SPACING);
-    viewport.x = Math.min(Math.max(0, wx - viewport.width / 2), Math.max(0, grid.width - viewport.width));
-    viewport.y = Math.min(Math.max(0, wy - viewport.height / 2), Math.max(0, grid.height - viewport.height));
-
-    // toggle the nearest edge at that world coordinate so both views show the change
-    const edge = findClosestEdge(wx, wy);
-    if (edge) toggleEdge(edge);
-
-    requestRender();
-    return;
-  }
-
-  if (!pointerMovedSinceDown) {
-    // treat as tap on main canvas: toggle edge (existing behavior)
-    const world = clientToWorld(upX, upY);
-    const edge = findClosestEdge(world.x, world.y);
-    if (edge) toggleEdge(edge);
-    requestRender();
-  } else {
-    // ended a pan; already rendered while moving
-  }
-});
-
-
-  canvas.addEventListener('pointercancel', (ev) => {
-    if (lastPointer && ev.pointerId === lastPointer.id) {
-      isDragging = false;
-      lastPointer = null;
+  // Simple panning by drag on main canvas
+  let isPanning = false;
+  let panStart = null;
+  mainC.addEventListener('mousedown', (ev) => {
+    if (ev.button !== 0) return;
+    // allow panning by holding shift? For clarity, use right-click drag for panning
+    if (ev.shiftKey) {
+      isPanning = true;
+      panStart = { x: ev.clientX, y: ev.clientY, cx: viewport.cx, cy: viewport.cy };
+      ev.preventDefault();
     }
   });
+  window.addEventListener('mousemove', (ev) => {
+    if (!isPanning) return;
+    const dx = ev.clientX - panStart.x;
+    const dy = ev.clientY - panStart.y;
+    // translate dx,dy in screen pixels to full-space
+    const fx = -dx * (viewport.w / mainC.width);
+    const fy = -dy * (viewport.h / mainC.height);
+    viewport.cx = Math.max(viewport.w/2, Math.min(fullWidth - viewport.w/2, panStart.cx + fx));
+    viewport.cy = Math.max(viewport.h/2, Math.min(fullHeight - viewport.h/2, panStart.cy + fy));
+    draw();
+  });
+  window.addEventListener('mouseup', (ev) => {
+    if (isPanning) { isPanning = false; panStart = null; }
+  });
 
-  canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
+  // Touch support for main canvas taps
+  mainC.addEventListener('click', (ev) => {
+    // simple click toggles edge
+    handleMainClick(ev);
+  });
 
-  // coordinate transforms
-  function clientToWorld(cx, cy) {
-    const rect = canvas.getBoundingClientRect();
-    const localX = (cx - rect.left);
-    const localY = (cy - rect.top);
-    return { x: localX + viewport.x, y: localY + viewport.y };
-  }
+  miniC.addEventListener('click', (ev) => {
+    handleMiniClick(ev);
+  });
 
-  function pointInMinimap(cx, cy) {
-    return cx >= minimapState.x && cx <= (minimapState.x + minimapState.w) &&
-           cy >= minimapState.y && cy <= (minimapState.y + minimapState.h);
-  }
+  // Buttons
+  zoomInBtn.addEventListener('click', () => {
+    setZoom(zoom * 1.4);
+  });
+  zoomOutBtn.addEventListener('click', () => {
+    setZoom(zoom / 1.4);
+  });
+  resetBtn.addEventListener('click', () => {
+    zoom = INITIAL_ZOOM;
+    viewport.cx = fullWidth/2; viewport.cy = fullHeight/2;
+    viewport.w = mainC.width / zoom; viewport.h = mainC.height / zoom;
+    draw();
+  });
 
-  function minimapToWorldX(cx) {
-    const rx = cx - minimapState.x;
-    const ratio = rx / minimapState.w;
-    return ratio * minimapState.gridW;
-  }
-  function minimapToWorldY(cy) {
-    const ry = cy - minimapState.y;
-    const ratio = ry / minimapState.h;
-    return ratio * minimapState.gridH;
-  }
+  // init sizing and initial draw
+  resizeMainCanvas();
+  viewport.w = mainC.width / zoom;
+  viewport.h = mainC.height / zoom;
+  draw();
 
-  // Hit detection for edges (nearest horizontal or vertical edge midpoint)
-  function findClosestEdge(worldX, worldY) {
-    const spacing = DOT_SPACING;
-    const gx = worldX / spacing;
-    const gy = worldY / spacing;
+  // Keyboard: arrow keys to nudge viewport
+  window.addEventListener('keydown', (ev) => {
+    const step = Math.max(10, 0.06 * Math.min(viewport.w, viewport.h));
+    if (ev.key === 'ArrowLeft') { viewport.cx = Math.max(viewport.w/2, viewport.cx - step); draw(); }
+    if (ev.key === 'ArrowRight'){ viewport.cx = Math.min(fullWidth - viewport.w/2, viewport.cx + step); draw(); }
+    if (ev.key === 'ArrowUp')   { viewport.cy = Math.max(viewport.h/2, viewport.cy - step); draw(); }
+    if (ev.key === 'ArrowDown') { viewport.cy = Math.min(fullHeight - viewport.h/2, viewport.cy + step); draw(); }
+  });
 
-    let best = { type: null, r:0, c:0, dist: Infinity };
-
-    const rNear = Math.round(gy);
-    const cFloor = Math.floor(gx);
-    for (let dc = -1; dc <= 1; dc++) {
-      const c = cFloor + dc;
-      const r = rNear;
-      if (r < 0 || r >= ROWS) continue;
-      if (c < 0 || c >= COLS - 1) continue;
-      const mx = (c + 0.5) * spacing;
-      const my = r * spacing;
-      const d = Math.hypot(worldX - mx, worldY - my);
-      if (d < best.dist) best = { type:'h', r:r, c:c, dist:d };
-    }
-
-    const rFloor = Math.floor(gy);
-    const cNear = Math.round(gx);
-    for (let dr=-1; dr<=1; dr++) {
-      const r = rFloor + dr;
-      const c = cNear;
-      if (r < 0 || r >= ROWS - 1) continue;
-      if (c < 0 || c >= COLS) continue;
-      const mx = c * spacing;
-      const my = (r + 0.5) * spacing;
-      const d = Math.hypot(worldX - mx, worldY - my);
-      if (d < best.dist) best = { type:'v', r:r, c:c, dist:d };
-    }
-
-    const hitRadius = Math.max(10, spacing * 0.4);
-    if (best.dist <= hitRadius) return best;
-    return null;
-  }
-
- function toggleEdge(edge) {
-  if (!edge) return;
-
-  if (edge.type === 'h') {
-    const idx = edge.r * (COLS - 1) + edge.c;
-    const val = horizontalEdges[idx];
-    // if any line present -> remove, otherwise add one (but not above MAX_EDGE_COUNT)
-    horizontalEdges[idx] = (val >= 1) ? 0 : Math.min(MAX_EDGE_COUNT, val + 1);
-  } else if (edge.type === 'v') {
-    const idx = edge.r * COLS + edge.c;
-    const val = verticalEdges[idx];
-    verticalEdges[idx] = (val >= 1) ? 0 : Math.min(MAX_EDGE_COUNT, val + 1);
-  }
-
-  // ensure main canvas and minimap are updated
-  requestRender();
-}
-
-  // initialize viewport centered
-  function initViewport() {
-    fitCanvas();
-    const grid = gridPixelSize(DOT_SPACING);
-    viewport.x = Math.max(0, (grid.width - viewport.width) / 2);
-    viewport.y = Math.max(0, (grid.height - viewport.height) / 2);
-    requestRender();
-  }
-
-  initViewport();
-
-  // Expose some debug helpers
-  window.slitherlink = {
-    stateSummary: () => {
-      let h=0,v=0;
-      for (let i=0;i<horizontalEdges.length;i++) if (horizontalEdges[i]) h++;
-      for (let i=0;i<verticalEdges.length;i++) if (verticalEdges[i]) v++;
-      return { horiz:h, vert:v, total:h+v };
-    },
-    panTo: (x,y) => { viewport.x = x; viewport.y = y; requestRender(); }
+  // Expose a simple export to console for debugging
+  window.slitherExport = () => {
+    // returns arrays of edges as [[i1,j1,i2,j2],...]
+    const arr = [];
+    edges.forEach((v,k) => {
+      const [n1,n2] = k.split('|');
+      const [i1,j1] = n1.split(',').map(Number);
+      const [i2,j2] = n2.split(',').map(Number);
+      arr.push([i1,j1,i2,j2]);
+    });
+    return arr;
   };
 
+  // Performance note: if you want persistence integrate postMessage to Streamlit backend.
 })();
 </script>
 </body>
 </html>
 """
 
-st.components.v1.html(html, height=800, scrolling=False)
+# Embed the HTML as a component
+html(html_code, height=800)
