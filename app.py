@@ -1,9 +1,8 @@
 # app.py
-# Streamlit app: Slitherlink with zoomed-in editing and a true minimap (bottom-right)
+# Streamlit app: Slitherlink with zoomed-in editing and a minimap (bottom-right)
 # - Grid: 128 x 178 dots
-# - Minimap ALWAYS shows the entire puzzle (NOT the same scale as the zoomed view)
-# - Minimap rectangle indicates the zoomed viewport (solid white)
-# - Click-and-drag on the zoomed canvas pans and updates the rectangle on the minimap
+# - Minimap shows the entire puzzle (NO viewport rectangle)
+# - Click-and-drag on the zoomed canvas pans the viewport (minimap still updates edges but no rectangle)
 # - Dots are white on a black background
 #
 # Usage:
@@ -15,7 +14,7 @@ from streamlit.components.v1 import html
 
 st.set_page_config(layout="wide")
 
-st.markdown("## Slitherlink — Zoomed Editing + True Minimap (bottom-right)")
+st.markdown("## Slitherlink — Zoomed Editing + Minimap (no rectangle)")
 
 html_code = r"""
 <!doctype html>
@@ -23,7 +22,7 @@ html_code = r"""
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Slitherlink Zoom + Minimap (true whole-puzzle)</title>
+<title>Slitherlink Zoom + Minimap (no rectangle)</title>
 <style>
   html,body { height:100%; margin:0; font-family: Arial, sans-serif; background:#000; color:#fff; }
   #container { position:relative; height:80vh; width:100%; background:#000; overflow:hidden; }
@@ -44,7 +43,6 @@ html_code = r"""
   </div>
 
   <canvas id="mainCanvas"></canvas>
-  <!-- minimap canvas size will be set by JS so it keeps puzzle aspect ratio -->
   <canvas id="minimap"></canvas>
 </div>
 
@@ -235,7 +233,7 @@ html_code = r"""
     });
     mc.stroke();
 
-    // draw minimap (whole puzzle) and viewport rectangle
+    // draw minimap (whole puzzle) without viewport rectangle
     drawMinimap();
   }
 
@@ -277,20 +275,11 @@ html_code = r"""
     });
     mm.stroke();
 
-    // draw viewport rectangle (solid white) -- maps viewport full-space -> minimap coords
-    mm.strokeStyle = '#fff';
-    mm.lineWidth = 2;
-    mm.setLineDash([]); // solid
-    const vx = offX + (viewport.cx - viewport.w/2) * scale;
-    const vy = offY + (viewport.cy - viewport.h/2) * scale;
-    const vw = viewport.w * scale;
-    const vh = viewport.h * scale;
-    // clamp rectangle within minimap (safety)
-    mm.strokeRect(vx, vy, vw, vh);
+    // NOTE: intentionally not drawing a viewport rectangle per request
   }
 
   // Interaction: click on main toggles nearest edge (within threshold)
-  // click+drag on main pans viewport (and updates minimap rectangle)
+  // click+drag on main pans viewport (and updates minimap edges but no rectangle)
   let isPointerDown = false;
   let pointerStart = null;
   let isDragging = false;
