@@ -5,8 +5,8 @@ from streamlit.components.v1 import html
 st.set_page_config(page_title="Slitherlink Board", layout="wide")
 
 # Fixed board size: 200 x 200 dots (199 x 199 cells)
-ROWS = 199   # number of rows of cells
-COLS = 199   # number of columns of cells
+ROWS = 199   # cells vertically
+COLS = 199   # cells horizontally
 CELL_PX = 16
 IFRAME_HEIGHT = 1200
 
@@ -32,100 +32,51 @@ HTML = """
   const MARGIN = 6;
   const SVG_NS = "http://www.w3.org/2000/svg";
 
-  // using a Set of "r,c,d" strings for edges
   const filled = new Set();
 
-  // pointer/drag state
+  // pointer state
   let pointerActive = false;
-  let pointerMode = null;    // 'add' or 'remove'
-  let lastEdge = null;       // last processed edge key
-  let dragDirection = null;  // 'h' or 'v' locked on initial pointerdown
+  let pointerMode = null;       // 'add' or 'remove'
+  let initialEdge = null;       // key of the first selected edge
+  let dragAxis = null;          // 'h' or 'v' decided by first significant move
+  let lastAddedEdge = null;     // last edge added/removed (for stepping)
+  let startClient = null;       // {x,y} of initial pointerdown client coords
+  let viewBoxW = null, viewBoxH = null; // for coordinate mapping
 
   function edgeKey(r,c,d){ return r + "," + c + "," + d; }
+  function parseKey(key){ const p = key.split(','); return {r:parseInt(p[0],10), c:parseInt(p[1],10), d:p[2]}; }
 
-  // parse an edge key into {r,c,d}
-  function parseKey(key){
-    const parts = key.split(',');
-    return { r: parseInt(parts[0],10), c: parseInt(parts[1],10), d: parts[2] };
-  }
-
-  // given an edge key, return its two endpoint vertices as [v1, v2],
-  // where a vertex is an object {r,c}
   function endpointsOf(key){
     const {r,c,d} = parseKey(key);
-    if (d === 'h'){
-      return [{r: r, c: c}, {r: r, c: c+1}];
-    } else {
-      return [{r: r, c: c}, {r: r+1, c: c}];
-    }
+    return d === 'h' ? [{r:r,c:c},{r:r,c:c+1}] : [{r:r,c:c},{r:r+1,c:c}];
   }
 
-  // return number of incident filled edges at a given vertex {r,c}
-  function vertexDegree(vertex){
-    const vr = vertex.r, vc = vertex.c;
-    let deg = 0;
-    // check horizontal edges touching this vertex:
-    // top horizontal at (vr, vc-1)? careful: horizontal edges are keyed by (r, c) for segment from (r,c) to (r,c+1)
-    // incident horizontals: (vr, vc-1, 'h') and (vr, vc, 'h')
-    const h1 = edgeKey(vr, vc-1, 'h');
-    const h2 = edgeKey(vr, vc, 'h');
-    if (vc-1 >= 0 && filled.has(h1)) deg++;
-    if (vc <= COLS-1 && filled.has(h2)) deg++;
-    // incident verticals: (vr-1, vc, 'v') and (vr, vc, 'v') where vertical (r,c,'v') goes (r,c)->(r+1,c)
-    const v1 = edgeKey(vr-1, vc, 'v');
-    const v2 = edgeKey(vr, vc, 'v');
-    if (vr-1 >= 0 && filled.has(v1)) deg++;
-    if (vr <= ROWS-1 && filled.has(v2)) deg++;
+  function vertexDegree(v){
+    const vr=v.r, vc=v.c;
+    let deg=0;
+    // horizontals
+    if(vc-1 >= 0 && filled.has(edgeKey(vr,vc-1,'h'))) deg++;
+    if(vc <= COLS-1 && filled.has(edgeKey(vr,vc,'h'))) deg++;
+    // verticals
+    if(vr-1 >= 0 && filled.has(edgeKey(vr-1,vc,'v'))) deg++;
+    if(vr <= ROWS-1 && filled.has(edgeKey(vr,vc,'v'))) deg++;
     return deg;
   }
 
-  // return whether adding edge (key) would violate degree > 2 at either endpoint
   function wouldExceedDegreeIfAdded(key){
-    // if edge is already present then adding isn't relevant (we won't add)
-    if (filled.has(key)) return false;
+    if(filled.has(key)) return false;
     const eps = endpointsOf(key);
-    for (const v of eps){
-      const d = vertexDegree(v);
-      if (d >= 2) return true; // adding would make it >2
+    for(const v of eps){
+      if(vertexDegree(v) >= 2) return true;
     }
     return false;
-  }
-
-  // toggle but respect degree rule for adds
-  function tryToggleEdge(key){
-    if (filled.has(key)){
-      // always allow removal
-      filled.delete(key);
-      update();
-      return true;
-    } else {
-      // addition: block if it would exceed degree
-      if (wouldExceedDegreeIfAdded(key)){
-        // optionally flash or ignore
-        flashBlocked(key);
-        return false;
-      }
-      filled.add(key);
-      update();
-      return true;
-    }
-  }
-
-  function flashBlocked(key){
-    // brief visual feedback: make the hit line briefly red (if present)
-    const g = svg.querySelector(`[data-edge="${key}"]`);
-    if (!g) return;
-    const vis = g.querySelector('.vis');
-    const old = vis.getAttribute('stroke');
-    vis.setAttribute('stroke','#d00');
-    setTimeout(()=>{ // restore
-      vis.setAttribute('stroke', filled.has(key) ? '#000' : 'transparent');
-    }, 220);
   }
 
   // build SVG
   const width  = COLS * CELL + MARGIN * 2;
   const height = ROWS * CELL + MARGIN * 2;
+  viewBoxW = width; viewBoxH = height;
+
   const svg = document.createElementNS(SVG_NS,"svg");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
@@ -133,17 +84,16 @@ HTML = """
   svg.style.height = "auto";
   document.getElementById("root").appendChild(svg);
 
-  // background rect
   const bg = document.createElementNS(SVG_NS,"rect");
   bg.setAttribute("x",0); bg.setAttribute("y",0);
   bg.setAttribute("width", width); bg.setAttribute("height", height);
   bg.setAttribute("fill", "transparent");
   svg.appendChild(bg);
 
-  // draw dots (very lightweight circles)
+  // draw dots
   const dotR = 2;
-  for (let r=0; r<=ROWS; r++){
-    for (let c=0; c<=COLS; c++){
+  for(let r=0;r<=ROWS;r++){
+    for(let c=0;c<=COLS;c++){
       const dot = document.createElementNS(SVG_NS,"circle");
       dot.setAttribute("cx", MARGIN + c*CELL);
       dot.setAttribute("cy", MARGIN + r*CELL);
@@ -153,7 +103,8 @@ HTML = """
     }
   }
 
-  // helper to create edge group (visible + hit)
+  // create edge groups (vis + hit) but keep hit handlers lightweight;
+  // we'll still support pointerdown even if user clicks slightly off by computing nearest edge
   function createEdgeGroup(x1,y1,x2,y2,key){
     const g = document.createElementNS(SVG_NS,"g");
     g.setAttribute("data-edge", key);
@@ -164,6 +115,7 @@ HTML = """
     vis.setAttribute("stroke-linecap", "round");
     vis.setAttribute("class", "vis");
     vis.setAttribute("stroke", "transparent");
+
     const hit = document.createElementNS(SVG_NS,"line");
     hit.setAttribute("x1", x1); hit.setAttribute("y1", y1);
     hit.setAttribute("x2", x2); hit.setAttribute("y2", y2);
@@ -171,91 +123,32 @@ HTML = """
     hit.setAttribute("stroke", "transparent");
     hit.style.cursor = "pointer";
 
-    // pointer handlers
+    // lightweight handlers here: but the primary selection logic will compute nearest edge if needed
     hit.addEventListener("pointerdown", function(ev){
-      ev.preventDefault();
-      try{ ev.target.setPointerCapture(ev.pointerId); } catch(e){}
-      pointerActive = true;
-      pointerMode = filled.has(key) ? "remove" : "add";
-      // lock drag direction from this initial edge's direction
-      const parts = key.split(",");
-      dragDirection = parts[2]; // 'h' or 'v'
-      lastEdge = key;
-      // immediate toggle attempt
-      tryToggleEdge(key);
+      handlePointerDown(ev);
     });
-
     hit.addEventListener("pointerup", function(ev){
-      try{ ev.target.releasePointerCapture(ev.pointerId); } catch(e){}
-      pointerActive = false;
-      pointerMode = null;
-      lastEdge = null;
-      dragDirection = null;
+      handlePointerUp(ev);
     });
 
-    g.appendChild(vis);
-    g.appendChild(hit);
-    return g;
+    g.appendChild(vis); g.appendChild(hit);
+    svg.appendChild(g);
   }
 
-  // create all horizontal edges
-  for (let r=0; r<=ROWS; r++){
-    for (let c=0; c<COLS; c++){
-      const x1 = MARGIN + c*CELL;
-      const y  = MARGIN + r*CELL;
-      const x2 = x1 + CELL;
-      const key = edgeKey(r,c,'h');
-      const g = createEdgeGroup(x1,y,x2,y,key);
-      svg.appendChild(g);
+  for(let r=0;r<=ROWS;r++){
+    for(let c=0;c<COLS;c++){
+      const x1 = MARGIN + c*CELL, y = MARGIN + r*CELL, x2 = x1 + CELL;
+      createEdgeGroup(x1,y,x2,y, edgeKey(r,c,'h'));
+    }
+  }
+  for(let r=0;r<ROWS;r++){
+    for(let c=0;c<=COLS;c++){
+      const x = MARGIN + c*CELL, y1 = MARGIN + r*CELL, y2 = y1 + CELL;
+      createEdgeGroup(x,y1,x,y2, edgeKey(r,c,'v'));
     }
   }
 
-  // create all vertical edges
-  for (let r=0; r<ROWS; r++){
-    for (let c=0; c<=COLS; c++){
-      const x  = MARGIN + c*CELL;
-      const y1 = MARGIN + r*CELL;
-      const y2 = y1 + CELL;
-      const key = edgeKey(r,c,'v');
-      const g = createEdgeGroup(x,y1,x,y2,key);
-      svg.appendChild(g);
-    }
-  }
-
-  // pointermove: only act on edges that match dragDirection while dragging
-  document.addEventListener("pointermove", function(ev){
-    if(!pointerActive) return;
-    // find element under pointer
-    const el = document.elementFromPoint(ev.clientX, ev.clientY);
-    if(!el) return;
-    const g = el.closest && el.closest("[data-edge]");
-    if(!g) return;
-    const key = g.getAttribute("data-edge");
-    if(key === lastEdge) return; // skip repeats
-    // enforce same direction as initial
-    const parts = key.split(",");
-    const d = parts[2];
-    if(d !== dragDirection) return;
-    lastEdge = key;
-    if(pointerMode === "add"){
-      // attempt to add, but will be blocked if degree would exceed 2
-      if(!filled.has(key)){
-        if(!wouldExceedDegreeIfAdded(key)){
-          filled.add(key);
-          updateVisuals();
-        } else {
-          // feedback: briefly flash blocked
-          flashBlocked(key);
-        }
-      }
-    } else if(pointerMode === "remove"){
-      if(filled.has(key)){
-        filled.delete(key);
-        updateVisuals();
-      }
-    }
-  }, {passive:true});
-
+  // update visuals
   function updateVisuals(){
     svg.querySelectorAll("[data-edge]").forEach(function(g){
       const k = g.getAttribute("data-edge");
@@ -268,19 +161,206 @@ HTML = """
     });
   }
 
-  // small visual flash for blocked adds
-  function flashBlocked(key){
-    const g = svg.querySelector(`[data-edge="${key}"]`);
-    if(!g) return;
-    const vis = g.querySelector(".vis");
-    const prev = vis.getAttribute("stroke");
-    vis.setAttribute("stroke","#d00");
-    setTimeout(()=>{
-      vis.setAttribute("stroke", filled.has(key) ? "#000" : "transparent");
-    }, 200);
+  // map client coords to viewBox coords (approximate, accounts for CSS scaling)
+  function clientToViewBox(clientX, clientY){
+    const rect = svg.getBoundingClientRect();
+    // fraction within rect
+    const fx = (clientX - rect.left) / rect.width;
+    const fy = (clientY - rect.top) / rect.height;
+    // map to viewBox (0..viewBoxW / viewBoxH)
+    return { x: fx * viewBoxW, y: fy * viewBoxH };
   }
 
-  // simple double-tap zoom and pinch-to-zoom
+  // compute nearest candidate edge to given client coords
+  function nearestEdgeKeyForClient(clientX, clientY){
+    const pt = clientToViewBox(clientX, clientY);
+    const sx = pt.x, sy = pt.y;
+    // compute nearest horizontal candidate:
+    const r_h = Math.round((sy - MARGIN) / CELL);
+    const c_h = Math.floor((sx - MARGIN) / CELL);
+    let dist_h = Infinity, key_h = null;
+    if(r_h >= 0 && r_h <= ROWS && c_h >= 0 && c_h < COLS){
+      const hx = MARGIN + (c_h + 0.5) * CELL;
+      const hy = MARGIN + r_h * CELL;
+      dist_h = Math.hypot(sx - hx, sy - hy);
+      key_h = edgeKey(r_h, c_h, 'h');
+    }
+    // compute vertical candidate:
+    const c_v = Math.round((sx - MARGIN) / CELL);
+    const r_v = Math.floor((sy - MARGIN) / CELL);
+    let dist_v = Infinity, key_v = null;
+    if(c_v >= 0 && c_v <= COLS && r_v >= 0 && r_v < ROWS){
+      const vx = MARGIN + c_v * CELL;
+      const vy = MARGIN + (r_v + 0.5) * CELL;
+      dist_v = Math.hypot(sx - vx, sy - vy);
+      key_v = edgeKey(r_v, c_v, 'v');
+    }
+    // choose smaller distance
+    if(dist_h <= dist_v) return key_h;
+    return key_v;
+  }
+
+  // core: handle pointerdown (choose nearest edge if needed)
+  function handlePointerDown(ev){
+    ev.preventDefault();
+    try{ ev.target.setPointerCapture(ev.pointerId); } catch(e){}
+    pointerActive = true;
+    startClient = { x: ev.clientX, y: ev.clientY };
+    // pick nearest edge (even if the event was on background)
+    const chosen = nearestEdgeKeyForClient(ev.clientX, ev.clientY);
+    if(!chosen) return;
+    initialEdge = chosen;
+    lastAddedEdge = chosen;
+    // decide add/remove based on current presence
+    pointerMode = filled.has(chosen) ? 'remove' : 'add';
+    // do the immediate attempt (respecting degree rules)
+    if(pointerMode === 'add'){
+      if(!wouldExceedDegreeIfAdded(chosen)){
+        filled.add(chosen);
+      } else {
+        flash(chosen);
+      }
+    } else {
+      // remove
+      filled.delete(chosen);
+    }
+    updateVisuals();
+    // dragAxis unknown until movement; set to null now
+    dragAxis = null;
+  }
+
+  function handlePointerUp(ev){
+    try{ ev.target.releasePointerCapture(ev.pointerId); } catch(e){}
+    pointerActive = false;
+    pointerMode = null;
+    initialEdge = null;
+    lastAddedEdge = null;
+    startClient = null;
+    dragAxis = null;
+  }
+
+  function flash(key){
+    const g = svg.querySelector(`[data-edge="${key}"]`);
+    if(!g) return;
+    const vis = g.querySelector('.vis');
+    vis.setAttribute('stroke','#d00');
+    setTimeout(()=>{ vis.setAttribute('stroke', filled.has(key) ? '#000' : 'transparent'); }, 180);
+  }
+
+  // pointermove: determine axis on first significant move; step along axis
+  document.addEventListener("pointermove", function(ev){
+    if(!pointerActive) return;
+    if(!startClient) return;
+    const dx = ev.clientX - startClient.x;
+    const dy = ev.clientY - startClient.y;
+    // determine axis if not set and movement significant
+    if(!dragAxis){
+      if(Math.hypot(dx,dy) < 6) return; // ignore tiny tremble
+      dragAxis = Math.abs(dx) >= Math.abs(dy) ? 'h' : 'v';
+      // record initial direction sign
+      // we will step based on sign of projection along axis relative to initial pointer
+    }
+    // compute how far along axis we've moved relative to cell size in client space
+    // map movement in client pixels to viewBox units and then to cell steps
+    const rect = svg.getBoundingClientRect();
+    const unitPerClientX = viewBoxW / rect.width;
+    const unitPerClientY = viewBoxH / rect.height;
+    let step = 0;
+    let sign = 0;
+    if(dragAxis === 'h'){
+      const moved_units = dx * unitPerClientX;
+      step = Math.floor(Math.abs(moved_units) / CELL);
+      sign = moved_units >= 0 ? 1 : -1;
+    } else {
+      const moved_units = dy * unitPerClientY;
+      step = Math.floor(Math.abs(moved_units) / CELL);
+      sign = moved_units >= 0 ? 1 : -1;
+    }
+    if(step <= 0) return;
+    // starting from initialEdge, step `step` times, adding/removing edges along axis in direction `sign`
+    let base = parseKey(initialEdge);
+    // base r,c,d correspond to the initial edge; we must step from that index
+    for(let s=1; s<=step; s++){
+      let keyToAct = null;
+      if(base.d === 'h' && dragAxis === 'h'){
+        const newC = base.c + sign * s;
+        const newR = base.r;
+        if(newC < 0 || newC >= COLS) break;
+        keyToAct = edgeKey(newR, newC, 'h');
+      } else if(base.d === 'v' && dragAxis === 'v'){
+        const newR = base.r + sign * s;
+        const newC = base.c;
+        if(newR < 0 || newR >= ROWS) break;
+        keyToAct = edgeKey(newR, newC, 'v');
+      } else if(base.d === 'h' && dragAxis === 'v'){
+        // user started on horizontal but dragged vertically; convert stepping along column
+        // choose vertical edges adjacent to the midpoint column
+        // map to vertical at column = base.c or base.c+1 depending on horizontal position
+        const colCandidate = (sign >= 0) ? base.c + 0 : base.c; // keep conservative mapping
+        const newR = base.r + sign * s;
+        const newC = base.c; // conservative
+        if(newR < 0 || newR >= ROWS) break;
+        keyToAct = edgeKey(newR, newC, 'v');
+      } else if(base.d === 'v' && dragAxis === 'h'){
+        // started vertical but dragging horizontal: choose horizontal edges adjacent
+        const newC = base.c + sign * s;
+        const newR = base.r;
+        if(newC < 0 || newC >= COLS) break;
+        keyToAct = edgeKey(newR, newC, 'h');
+      }
+      if(!keyToAct) continue;
+      // avoid repeating the same edge multiple times if lastAddedEdge already at or beyond it
+      // For simplicity, allow idempotent ops: adding when already present does nothing
+      if(pointerMode === 'add'){
+        if(!filled.has(keyToAct)){
+          if(!wouldExceedDegreeIfAdded(keyToAct)){
+            filled.add(keyToAct);
+            lastAddedEdge = keyToAct;
+          } else {
+            flash(keyToAct);
+          }
+        }
+      } else if(pointerMode === 'remove'){
+        if(filled.has(keyToAct)){
+          filled.delete(keyToAct);
+          lastAddedEdge = keyToAct;
+        }
+      }
+    }
+    updateVisuals();
+  }, {passive:true});
+
+  // helper: decide if adding this would exceed degree > 2
+  function wouldExceedDegreeIfAdded(key){
+    if(filled.has(key)) return false;
+    const eps = endpointsOf(key);
+    for(const v of eps){
+      if(vertexDegree(v) >= 2) return true;
+    }
+    return false;
+  }
+
+  // vertexDegree uses current filled set
+  function vertexDegree(v){
+    const vr=v.r, vc=v.c;
+    let deg=0;
+    if(vc-1 >= 0 && filled.has(edgeKey(vr,vc-1,'h'))) deg++;
+    if(vc <= COLS-1 && filled.has(edgeKey(vr,vc,'h'))) deg++;
+    if(vr-1 >= 0 && filled.has(edgeKey(vr-1,vc,'v'))) deg++;
+    if(vr <= ROWS-1 && filled.has(edgeKey(vr,vc,'v'))) deg++;
+    return deg;
+  }
+
+  // simple flash helper for blocked adds
+  function flash(key){
+    const g = svg.querySelector(`[data-edge="${key}"]`);
+    if(!g) return;
+    const vis = g.querySelector('.vis');
+    vis.setAttribute('stroke','#d00');
+    setTimeout(()=>{ vis.setAttribute('stroke', filled.has(key) ? '#000' : 'transparent'); }, 180);
+  }
+
+  // double-tap zoom and pinch-to-zoom (unchanged)
   let lastTap = 0;
   document.addEventListener("touchend", function(){
     const now = Date.now();
@@ -308,8 +388,11 @@ HTML = """
   }, {passive:false});
   document.addEventListener("touchend", function(){ lastDist = null; }, {passive:true});
 
-  // done
-  console.log("Slitherlink board ready. Edges:", svg.querySelectorAll("[data-edge]").length);
+  // initial visual update
+  updateVisuals();
+
+  console.log("Slitherlink board ready (directional drag with degree constraint).");
+
 })();
 </script>
 </body>
