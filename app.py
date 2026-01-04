@@ -423,20 +423,23 @@ html = r"""
     return null;
   }
 
-  function toggleEdge(edge) {
-    if (!edge) return;
-    if (edge.type === 'h') {
-      const idx = edge.r * (COLS - 1) + edge.c;
-      const val = horizontalEdges[idx];
-      if (val >= 1) horizontalEdges[idx] = 0;
-      else if (val < MAX_EDGE_COUNT) horizontalEdges[idx] = val + 1;
-    } else if (edge.type === 'v') {
-      const idx = edge.r * COLS + edge.c;
-      const val = verticalEdges[idx];
-      if (val >= 1) verticalEdges[idx] = 0;
-      else if (val < MAX_EDGE_COUNT) verticalEdges[idx] = val + 1;
-    }
+ function toggleEdge(edge) {
+  if (!edge) return;
+
+  if (edge.type === 'h') {
+    const idx = edge.r * (COLS - 1) + edge.c;
+    const val = horizontalEdges[idx];
+    // if any line present -> remove, otherwise add one (but not above MAX_EDGE_COUNT)
+    horizontalEdges[idx] = (val >= 1) ? 0 : Math.min(MAX_EDGE_COUNT, val + 1);
+  } else if (edge.type === 'v') {
+    const idx = edge.r * COLS + edge.c;
+    const val = verticalEdges[idx];
+    verticalEdges[idx] = (val >= 1) ? 0 : Math.min(MAX_EDGE_COUNT, val + 1);
   }
+
+  // ensure main canvas and minimap are updated
+  requestRender();
+}
 
   // initialize viewport centered
   function initViewport() {
