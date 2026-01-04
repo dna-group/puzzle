@@ -135,3 +135,274 @@ html = r"""
       if (baseY + spacing + DOT_RADIUS < y0 - spacing || baseY - DOT_RADIUS > y1 + spacing) continue;
       for (let c=0; c<COLS; c++) {
         const idx = r * COLS + c;
+        const val = verticalEdges[idx];
+        if (val === 0) continue;
+        const x = c * spacing;
+        const ystart = baseY;
+        const yend = baseY + spacing;
+        if (x + DOT_RADIUS < x0 - spacing || x - DOT_RADIUS > x1 + spacing) continue;
+        ctx.strokeStyle = '#00d0ff';
+        ctx.lineWidth = EDGE_WIDTH;
+        ctx.beginPath();
+        ctx.moveTo(x - viewport.x, ystart - viewport.y);
+        ctx.lineTo(x - viewport.x, yend - viewport.y);
+        ctx.stroke();
+
+        if (val === 2) {
+          ctx.strokeStyle = '#0090a0';
+          ctx.lineWidth = EDGE_WIDTH - 1.6;
+          ctx.beginPath();
+          ctx.moveTo(x - viewport.x + 3, ystart - viewport.y);
+          ctx.lineTo(x - viewport.x + 3, yend - viewport.y);
+          ctx.stroke();
+        }
+      }
+    }
+
+    // draw dots (visible)
+    const dotColor = '#e6e6e6';
+    ctx.fillStyle = dotColor;
+    const rStart = Math.max(0, Math.floor((y0 - DOT_RADIUS) / spacing));
+    const rEnd = Math.min(ROWS - 1, Math.ceil((y1 + DOT_RADIUS) / spacing));
+    const cStart = Math.max(0, Math.floor((x0 - DOT_RADIUS) / spacing));
+    const cEnd = Math.min(COLS - 1, Math.ceil((x1 + DOT_RADIUS) / spacing));
+    for (let r=rStart; r<=rEnd; r++) {
+      const ry = r * spacing - viewport.y;
+      for (let c=cStart; c<=cEnd; c++) {
+        const rx = c * spacing - viewport.x;
+        ctx.beginPath();
+        ctx.arc(rx, ry, DOT_RADIUS * (scale + 0.1), 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function clientToWorld(cx, cy) {
+    const rect = canvas.getBoundingClientRect();
+    const localX = (cx - rect.left);
+    const localY = (cy - rect.top);
+    return { x: localX + viewport.x, y: localY + viewport.y };
+  }
+
+  function findClosestEdge(worldX, worldY) {
+    const spacing = DOT_SPACING * scale;
+    const gx = worldX / spacing;
+    const gy = worldY / spacing;
+
+    const rNear = Math.round(gy);
+    const cFloor = Math.floor(gx);
+    let best = { type: null, r:0, c:0, dist: Infinity };
+
+    for (let dc = -1; dc <= 1; dc++) {
+      const c = cFloor + dc;
+      const r = rNear;
+      if (r < 0 || r >= ROWS) continue;
+      if (c < 0 || c >= COLS - 1) continue;
+      const mx = (c + 0.5) * spacing;
+      const my = r * spacing;
+      const dx = worldX - mx;
+      const dy = worldY - my;
+      const d = Math.hypot(dx, dy);
+      if (d < best.dist) {
+        best = { type: 'h', r: r, c: c, dist: d };
+      }
+    }
+
+    const rFloor = Math.floor(gy);
+    const cNear = Math.round(gx);
+    for (let dr=-1; dr<=1; dr++) {
+      const r = rFloor + dr;
+      const c = cNear;
+      if (r < 0 || r >= ROWS - 1) continue;
+      if (c < 0 || c >= COLS) continue;
+      const mx = c * spacing;
+      const my = (r + 0.5) * spacing;
+      const dx = worldX - mx;
+      const dy = worldY - my;
+      const d = Math.hypot(dx, dy);
+      if (d < best.dist) {
+        best = { type: 'v', r: r, c: c, dist: d };
+      }
+    }
+
+    const hitRadius = Math.max(10, spacing * 0.4);
+    if (best.dist <= hitRadius) return best;
+    return null;
+  }
+
+  function toggleEdge(edge) {
+    if (!edge) return;
+    if (edge.type === 'h') {
+      const idx = edge.r * (COLS - 1) + edge.c;
+      const val = horizontalEdges[idx];
+      if (val >= 1) {
+        horizontalEdges[idx] = 0;
+      } else {
+        if (val < MAX_EDGE_COUNT) horizontalEdges[idx] = val + 1;
+      }
+    } else if (edge.type === 'v') {
+      const idx = edge.r * COLS + edge.c;
+      const val = verticalEdges[idx];
+      if (val >= 1) {
+        verticalEdges[idx] = 0;
+      } else {
+        if (val < MAX_EDGE_COUNT) verticalEdges[idx] = val + 1;
+      }
+    }
+    requestRender();
+  }
+
+  function initViewport() {
+    fitCanvas();
+    scale = 1.0;
+    zoomedOut = false;
+    const spacing = DOT_SPACING * scale;
+    const gsize = gridPixelSize(spacing);
+    viewport.x = Math.max(0, (gsize.width - viewport.width) / 2);
+    viewport.y = Math.max(0, (gsize.height - viewport.height) / 2);
+    requestRender();
+  }
+
+  function toggleZoom(worldCenter) {
+    const spacingIn = DOT_SPACING;
+    if (!zoomedOut) {
+      const grid = gridPixelSize(spacingIn);
+      const sx = viewport.width / grid.width;
+      const sy = viewport.height / grid.height;
+      const s = Math.min(sx, sy, 1.0);
+      scale = s;
+      zoomedOut = true;
+      const gW = grid.width * scale;
+      const gH = grid.height * scale;
+      viewport.x = Math.max(0, (gW - viewport.width) / 2);
+      viewport.y = Math.max(0, (gH - viewport.height) / 2);
+      requestRender();
+    } else {
+      scale = 1.0;
+      zoomedOut = false;
+      const spacing = DOT_SPACING * scale;
+      const grid = gridPixelSize(spacing);
+      if (worldCenter) {
+        const centerX = worldCenter.x;
+        const centerY = worldCenter.y;
+        viewport.x = Math.min(Math.max(0, centerX - viewport.width / 2), Math.max(0, grid.width - viewport.width));
+        viewport.y = Math.min(Math.max(0, centerY - viewport.height / 2), Math.max(0, grid.height - viewport.height));
+      } else {
+        viewport.x = Math.max(0, (grid.width - viewport.width) / 2);
+        viewport.y = Math.max(0, (grid.height - viewport.height) / 2);
+      }
+      requestRender();
+    }
+  }
+
+  // --- pointer handling with double-tap suppression ---
+  let isDragging = false;
+  let lastPointer = null;
+  let dragStart = null;
+  let pointerMovedSinceDown = false;
+
+  // Double-tap detection / suppression
+  let lastTapTime = 0;
+  let lastTapPos = null;
+  const DOUBLE_TAP_DELAY = 300;
+  let suppressNextTap = false;
+  let doubleTapWorld = null;
+
+  canvas.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    canvas.setPointerCapture(ev.pointerId);
+    lastPointer = { id: ev.pointerId, x: ev.clientX, y: ev.clientY };
+    dragStart = { x: ev.clientX, y: ev.clientY, vx: viewport.x, vy: viewport.y };
+    pointerMovedSinceDown = false;
+    isDragging = true;
+
+    const timeNow = performance.now();
+    const isDoubleCandidate = (timeNow - lastTapTime) <= DOUBLE_TAP_DELAY &&
+                              lastTapPos &&
+                              Math.hypot(ev.clientX - lastTapPos.x, ev.clientY - lastTapPos.y) < 40;
+    if (isDoubleCandidate) {
+      suppressNextTap = true;
+      doubleTapWorld = clientToWorld(ev.clientX, ev.clientY);
+      lastTapTime = 0;
+      lastTapPos = null;
+    }
+  });
+
+  canvas.addEventListener('pointermove', (ev) => {
+    if (!isDragging || ev.pointerId !== lastPointer.id) return;
+    const dx = ev.clientX - dragStart.x;
+    const dy = ev.clientY - dragStart.y;
+    if (Math.hypot(dx, dy) > 4) {
+      pointerMovedSinceDown = true;
+      viewport.x = Math.max(0, dragStart.vx - dx);
+      viewport.y = Math.max(0, dragStart.vy - dy);
+      const spacing = DOT_SPACING * scale;
+      const gsize = gridPixelSize(spacing);
+      viewport.x = Math.min(viewport.x, Math.max(0, gsize.width - viewport.width));
+      viewport.y = Math.min(viewport.y, Math.max(0, gsize.height - viewport.height));
+      requestRender();
+    }
+    lastPointer.x = ev.clientX;
+    lastPointer.y = ev.clientY;
+  });
+
+  canvas.addEventListener('pointerup', (ev) => {
+    if (!lastPointer || ev.pointerId !== lastPointer.id) return;
+    canvas.releasePointerCapture(ev.pointerId);
+    isDragging = false;
+
+    const upX = ev.clientX;
+    const upY = ev.clientY;
+    const timeNow = performance.now();
+
+    if (!pointerMovedSinceDown) {
+      if (suppressNextTap) {
+        toggleZoom(doubleTapWorld);
+        suppressNextTap = false;
+        doubleTapWorld = null;
+        return;
+      }
+
+      const world = clientToWorld(upX, upY);
+      const edge = findClosestEdge(world.x, world.y);
+      if (edge) toggleEdge(edge);
+
+      lastTapTime = timeNow;
+      lastTapPos = { x: upX, y: upY };
+    } else {
+      suppressNextTap = false;
+      doubleTapWorld = null;
+    }
+  });
+
+  canvas.addEventListener('pointercancel', (ev) => {
+    if (lastPointer && ev.pointerId === lastPointer.id) {
+      isDragging = false;
+      lastPointer = null;
+      suppressNextTap = false;
+      doubleTapWorld = null;
+    }
+  });
+
+  canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
+
+  initViewport();
+  requestRender();
+
+  window.slitherlink = {
+    toggleZoom: () => toggleZoom(),
+    stateSummary: () => {
+      let h = 0, v = 0;
+      for (let i=0;i<horizontalEdges.length;i++) if (horizontalEdges[i]) h++;
+      for (let i=0;i<verticalEdges.length;i++) if (verticalEdges[i]) v++;
+      return { horiz: h, vert: v, total: h+v };
+    }
+  };
+
+})();
+</script>
+</body>
+</html>
+"""
+
+st.components.v1.html(html, height=800, scrolling=False)
