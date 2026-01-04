@@ -420,6 +420,105 @@ html_code = r"""
   };
 
 })();
+
+<!-- Add this inside the HTML body, after your other scripts (or at end of the main script) -->
+<style>
+  #bookmarkBtn {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 9999;
+    background: #222;
+    color: #fff;
+    border: none;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    opacity: 0.9;
+  }
+  #bookmarkBtn:active { transform: translateY(1px); }
+</style>
+
+<button id="bookmarkBtn" title="Copy bookmark link">🔖 Bookmark</button>
+
+<script>
+  (function(){
+    const btn = document.getElementById('bookmarkBtn');
+
+    // builds a token for current state (edges + viewport). Reuse your encoder or inline similar structure.
+    function buildStateToken(){
+      // gather edges
+      const edgesArr = [];
+      edges.forEach((_, k) => {
+        const [a,b] = k.split("|");
+        const aa = a.split(",").map(Number), bb = b.split(",").map(Number);
+        edgesArr.push([aa[0], aa[1], bb[0], bb[1]]);
+      });
+      const stateObj = {
+        edges: edgesArr,
+        viewport: { cx: viewport.cx, cy: viewport.cy, zoom: zoom }
+      };
+      return encodeStateToString(stateObj); // uses your existing encodeStateToString()
+    }
+
+    async function copyText(text){
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch(e) {
+        // fallback for older browsers
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          return true;
+        } catch(err) {
+          return false;
+        }
+      }
+    }
+
+    btn.addEventListener('click', async () => {
+      const token = buildStateToken();
+      if (!token) {
+        alert('Could not produce state token.');
+        return;
+      }
+      const urlWithState = window.location.origin + window.location.pathname + window.location.search + '#state=' + token;
+
+      // Try to update top-level location (works only if same-origin)
+      try {
+        if (window.top && window.top.location && window.top === window) {
+          // not in iframe — just set location
+          window.location.replace(urlWithState);
+          return;
+        } else if (window.top && window.top.location && window.top.origin === window.location.origin) {
+          // same-origin - allowed
+          window.top.location.replace(urlWithState);
+          return;
+        }
+      } catch (e) {
+        // permission denied (cross-origin)
+      }
+
+      // Fallback: copy to clipboard and inform user to paste in address bar
+      const ok = await copyText(urlWithState);
+      if (ok) {
+        alert('Bookmark link copied to clipboard. Paste it in your browser address bar and bookmark the page.');
+      } else {
+        // final fallback: show link in prompt for manual copy
+        window.prompt('Copy this link and bookmark it:', urlWithState);
+      }
+    });
+  })();
+</script>
+
 </script>
 </body>
 </html>
