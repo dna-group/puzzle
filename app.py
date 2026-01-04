@@ -2,7 +2,7 @@
 import streamlit as st
 from streamlit.components.v1 import html
 
-st.set_page_config(page_title="Slitherlink Canvas (edge-follow)", layout="wide")
+st.set_page_config(page_title="Slitherlink Canvas (circle-detect)", layout="wide")
 
 # Board parameters
 DOTS_X = 200
@@ -42,14 +42,16 @@ HTML = """
   const viewW = COLS * CELL + MARGIN * 2;
   const viewH = ROWS * CELL + MARGIN * 2;
 
-  // pointer state (simpler: no axis/stepping)
+  // pointer state
   let active = false;
-  let mode = null;           // 'add' or 'remove' depending on first hit
-  let lastEdge = null;       // last edge we acted on while dragging
+  let mode = null;           // 'add' or 'remove' (decided by first edge hit)
+  let lastEdge = null;       // last edge acted on (prevents repeats)
   let lastMoveEvent = null;
   let raf = null;
-  const MOVE_THRESHOLD = 2;   // pixels before reacting
-  const DETECT_RATIO = 0.7;   // detection radius relative to CELL (bigger = easier to hit)
+  const MOVE_THRESHOLD = 2;
+
+  // detection radius: diameter r/2 => radius = r/4
+  const DETECT_RADIUS_WORLD = CELL * 0.25;
 
   // helpers
   const edgeKey = (r,c,d) => `${r},${c},${d}`;
@@ -72,7 +74,7 @@ HTML = """
     return false;
   }
 
-  // transforms (pixel aligned)
+  // coordinate transforms (pixel-aligned drawing)
   function worldToCanvasPx(wx, wy){
     const sx = Math.round(wx * scale * dpr + tx);
     const sy = Math.round(wy * scale * dpr + ty);
@@ -85,8 +87,9 @@ HTML = """
     return { x: (cx_px - tx) / (scale * dpr), y: (cy_px - ty) / (scale * dpr) };
   }
 
-  // nearest edge + distance (world units)
+  // nearest edge + distance to its midpoint in world units
   function nearestEdgeToWorldWithDist(wx, wy){
+    // horizontal candidate
     const r_h = Math.round((wy - MARGIN) / CELL);
     const c_h = Math.floor((wx - MARGIN) / CELL);
     let dist_h = Infinity, key_h = null;
@@ -95,6 +98,7 @@ HTML = """
       dist_h = Math.hypot(wx - hx, wy - hy);
       key_h = edgeKey(r_h, c_h, 'h');
     }
+    // vertical candidate
     const c_v = Math.round((wx - MARGIN) / CELL);
     const r_v = Math.floor((wy - MARGIN) / CELL);
     let dist_v = Infinity, key_v = null;
@@ -107,7 +111,7 @@ HTML = """
     return { key: key_v, dist: dist_v };
   }
 
-  // drawing (pixel crisp)
+  // drawing
   function resizeCanvas(){
     const rect = canvas.getBoundingClientRect();
     canvas.width = Math.max(1, Math.floor(rect.width * dpr));
@@ -126,6 +130,7 @@ HTML = """
     ctx.lineWidth = Math.max(1, Math.floor(0.18 * CELL * scale * dpr));
     ctx.strokeStyle = '#000';
 
+    // draw filled edges
     filled.forEach(k=>{
       const p = parseKey(k);
       if(p.d === 'h'){
@@ -140,7 +145,7 @@ HTML = """
       }
     });
 
-    // dots on top
+    // draw dots on top
     ctx.fillStyle = '#000';
     const dotRadiusPx = Math.max(1, Math.round(0.12 * CELL * scale * dpr));
     for(let r=0;r<=ROWS;r++){
@@ -170,23 +175,7 @@ HTML = """
     setTimeout(draw, 160);
   }
 
-  // simplified interaction:
-  // - pointerdown: detect nearest edge within threshold, set mode based on presence, act on it immediately
-  // - pointermove (while active): detect nearest edge within threshold; if different from lastEdge, act on it
-  function handleActionOnEdge(key){
-    if(!key) return;
-    if(filled.has(key)){
-      // removal always allowed
-      filled.delete(key);
-    } else {
-      // add only if degree constraint allows
-      if(!wouldExceedIfAdd(key)) filled.add(key);
-      else flashBlocked(key);
-    }
-    draw();
-  }
-
-  // rAF throttled move
+  // process move with rAF
   function scheduleMove(ev){
     lastMoveEvent = ev;
     if(!raf) raf = requestAnimationFrame(processMove);
@@ -195,23 +184,26 @@ HTML = """
   function processMove(){
     raf = null;
     const ev = lastMoveEvent;
-    if(!active) return;
-    if(!ev) return;
-    const rect = canvas.getBoundingClientRect();
-    const dx = ev.clientX - (lastMoveEvent ? lastMoveEvent.clientX : ev.clientX);
-    const dy = ev.clientY - (lastMoveEvent ? lastMoveEvent.clientY : ev.clientY);
-    // small threshold for responsiveness
-    // we don't use dx/dy for direction anymore; just detect nearest edge under cursor
-    const world = clientToWorld(ev.clientX, ev.clientY);
-    const nearest = nearestEdgeToWorldWithDist(world.x, world.y);
-    const detectThresh = CELL * DETECT_RATIO;
-    if(nearest && nearest.dist <= detectThresh){
+    if(!active || !ev) return;
+    // get world coords of pointer
+    const w = clientToWorld(ev.clientX, ev.clientY);
+    const nearest = nearestEdgeToWorldWithDist(w.x, w.y);
+    if(!nearest || !nearest.key) return;
+    // detection: circle radius = CELL/4
+    if(nearest.dist <= DETECT_RADIUS_WORLD){
       if(nearest.key !== lastEdge){
-        // perform according to initial mode: add or remove
+        // first time entering this circle or switched to new edge
+        // if mode is null (didn't start on an edge), set mode now
+        if(mode === null){
+          mode = filled.has(nearest.key) ? 'remove' : 'add';
+        }
         if(mode === 'add'){
           if(!filled.has(nearest.key)){
-            if(!wouldExceedIfAdd(nearest.key)) filled.add(nearest.key);
-            else flashBlocked(nearest.key);
+            if(!wouldExceedIfAdd(nearest.key)){
+              filled.add(nearest.key);
+            } else {
+              flashBlocked(nearest.key);
+            }
           }
         } else {
           if(filled.has(nearest.key)) filled.delete(nearest.key);
@@ -228,23 +220,23 @@ HTML = """
     try{ ev.target.setPointerCapture(ev.pointerId); } catch(e){}
     active = true;
     lastEdge = null;
+    // decide initial mode if down occurs inside a detection circle
     const w = clientToWorld(ev.clientX, ev.clientY);
     const nearest = nearestEdgeToWorldWithDist(w.x, w.y);
-    const detectThresh = CELL * DETECT_RATIO;
-    if(nearest && nearest.dist <= detectThresh){
+    if(nearest && nearest.key && nearest.dist <= DETECT_RADIUS_WORLD){
       mode = filled.has(nearest.key) ? 'remove' : 'add';
-      // act immediately on that edge
+      // immediate action on down
       if(mode === 'add'){
-        if(!wouldExceedIfAdd(nearest.key)) filled.add(nearest.key);
-        else flashBlocked(nearest.key);
+        if(!filled.has(nearest.key)){
+          if(!wouldExceedIfAdd(nearest.key)) filled.add(nearest.key); else flashBlocked(nearest.key);
+        }
       } else {
-        filled.delete(nearest.key);
+        if(filled.has(nearest.key)) filled.delete(nearest.key);
       }
       lastEdge = nearest.key;
       draw();
     } else {
-      // no edge near enough: set mode null so drag does nothing until cursor moves near an edge
-      mode = null;
+      mode = null; // wait until pointer enters a detection circle during drag
     }
   }
 
@@ -262,7 +254,7 @@ HTML = """
     if(!raf) raf = requestAnimationFrame(processMove);
   }
 
-  // zoom & pan behavior (unchanged)
+  // zoom & pan (wheel & pinch) - unchanged
   let lastPinchDist = null, lastPinchCenter = null;
   canvas.addEventListener('wheel', function(e){
     e.preventDefault();
@@ -295,7 +287,7 @@ HTML = """
   }, {passive:false});
   canvas.addEventListener('touchend', function(e){ if(e.touches && e.touches.length < 2){ lastPinchDist = null; lastPinchCenter = null; } }, {passive:true});
 
-  // double-tap zoom
+  // double-tap to toggle zoom
   let lastTap = 0;
   canvas.addEventListener('touchend', function(e){
     const now = Date.now();
@@ -306,13 +298,14 @@ HTML = """
     lastTap = now;
   }, {passive:true});
 
-  // initial fit-to-screen
+  // initial fit-to-screen & setup
   function init(){
     const rect = canvas.getBoundingClientRect();
     const fitScale = Math.min(rect.width / viewW, rect.height / viewH) * 0.96;
     scale = Math.max(0.25, Math.min(6, fitScale));
     tx = (rect.width * dpr - viewW * scale * dpr) / 2;
     ty = (rect.height * dpr - viewH * scale * dpr) / 2;
+    const resizeObserver = () => resizeCanvas();
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
     canvas.addEventListener('pointerdown', onPointerDown);
@@ -323,7 +316,7 @@ HTML = """
     draw();
   }
 
-  // small helpers used by multiple places
+  // convert client coords to world coords (utility)
   function clientToWorld(cx, cy){
     const rect = canvas.getBoundingClientRect();
     const cx_px = (cx - rect.left) * dpr;
