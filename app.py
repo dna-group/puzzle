@@ -1,11 +1,7 @@
 # app.py
 # Streamlit + embedded client-side Slitherlink UI with state saved/restored in the URL fragment.
-# - Grid: 128 x 178
-# - Minimal UI (no buttons)
-# - Top-left of puzzle aligned to top-left of canvas on start
-# - Puzzle state (edges + viewport) encoded into the URL fragment (#state=...)
-#   -> use "Save / bookmark" by copying the page URL after interacting
-#   -> page will restore puzzle from that URL
+# Fixes: robust UTF-8-safe encode/decode (TextEncoder/TextDecoder) and ensure state is written
+# to the URL (fragment) on initialization and after interactions.
 #
 # Usage:
 #   pip install streamlit
@@ -21,7 +17,7 @@ html_code = r"""
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Slitherlink</title>
+<title>Slitherlink (save state in URL)</title>
 <style>
   html,body {
     height:100%;
@@ -70,8 +66,7 @@ html_code = r"""
 
   // State
   let zoom = INITIAL_ZOOM;
-  // Start with top-left of puzzle aligned to the top-left of the canvas:
-  let viewport = { cx: null, cy: null, w: null, h: null };
+  let viewport = { cx: null, cy: null, w: null, h: null }; // will be initialised on resize/load
 
   // edges: Map keyed "i1,j1|i2,j2"
   const edges = new Map();
@@ -179,27 +174,33 @@ html_code = r"""
     ctx.stroke();
   }
 
-  // Utilities: serialize/deserialize puzzle state to/from compact base64-friendly string
+  // Robust UTF-8 safe base64 URL-safe encode/decode using TextEncoder/TextDecoder
   function encodeStateToString(stateObj){
-    // Use URI-safe base64-ish encoding via btoa(encodeURIComponent(JSON))
     try {
       const json = JSON.stringify(stateObj);
-      // btoa needs binary-safe string; encode as UTF-8 surrogate handling
-      const base = btoa(unescape(encodeURIComponent(json)));
-      return base.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); // URL-safe
-    } catch(e){
+      const encoder = new TextEncoder();
+      const bytes = encoder.encode(json);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      let b64 = btoa(binary);
+      b64 = b64.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+      return b64;
+    } catch(e) {
       return "";
     }
   }
   function decodeStateFromString(s){
     try {
-      // restore padding
       s = s.replace(/-/g,'+').replace(/_/g,'/');
-      const pad = s.length % 4;
-      if (pad) s += '='.repeat(4 - pad);
-      const json = decodeURIComponent(escape(atob(s)));
+      while (s.length % 4 !== 0) s += '=';
+      const binary = atob(s);
+      const len = binary.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+      const decoder = new TextDecoder();
+      const json = decoder.decode(bytes);
       return JSON.parse(json);
-    } catch(e){
+    } catch(e) {
       return null;
     }
   }
@@ -211,23 +212,18 @@ html_code = r"""
       const payload = hash.slice(7);
       return decodeStateFromString(payload);
     }
-    // also support ?state=... (optional)
     const q = new URLSearchParams(window.location.search);
-    if (q.has("state")){
-      return decodeStateFromString(q.get("state"));
-    }
+    if (q.has("state")) return decodeStateFromString(q.get("state"));
     return null;
   }
 
   // Apply state (edges array and optional viewport)
   function applyState(obj){
     if (!obj) return;
-    // clear existing
     edges.clear();
     degree.clear();
     if (Array.isArray(obj.edges)){
       for (const e of obj.edges){
-        // e is [i1,j1,i2,j2]
         if (!Array.isArray(e) || e.length < 4) continue;
         const a = { x: e[0], y: e[1] }, b = { x: e[2], y: e[3] };
         const k = edgeKey(a,b);
@@ -236,17 +232,12 @@ html_code = r"""
         degree.set(nodeKey(b.x,b.y), (degree.get(nodeKey(b.x,b.y))||0)+1);
       }
     }
-    // viewport: we allow optional cx,cy,zoom. If provided, restore; otherwise keep current.
     if (obj.viewport && typeof obj.viewport === "object"){
-      if (typeof obj.viewport.zoom === "number" && obj.viewport.zoom > 0){
-        zoom = obj.viewport.zoom;
-      }
+      if (typeof obj.viewport.zoom === "number" && obj.viewport.zoom > 0) zoom = obj.viewport.zoom;
       if (typeof obj.viewport.cx === "number") viewport.cx = obj.viewport.cx;
       if (typeof obj.viewport.cy === "number") viewport.cy = obj.viewport.cy;
-      // recompute viewport sizes based on current canvas + zoom
       viewport.w = canvas.width / zoom;
       viewport.h = canvas.height / zoom;
-      // clamp
       viewport.cx = Math.max(viewport.w/2, Math.min(fullWidth - viewport.w/2, viewport.cx));
       viewport.cy = Math.max(viewport.h/2, Math.min(fullHeight - viewport.h/2, viewport.cy));
     }
@@ -275,7 +266,6 @@ html_code = r"""
     const token = encodeStateToString(stateObj);
     if (!token) return;
     const newHash = "#state=" + token;
-    // replace fragment without adding history entry
     history.replaceState(null, "", window.location.pathname + window.location.search + newHash);
   }
 
@@ -287,9 +277,8 @@ html_code = r"""
     return true;
   }
 
-  // Interaction: click toggles nearest edge if within threshold; pointer drag pans
+  // Find nearest edge (search neighborhood)
   function findNearestEdgeToFull(fullX, fullY){
-    // search local neighborhood for nearest horizontal/vertical midpoint
     const gx = (fullX - BORDER) / DOT_SPACING;
     const gy = (fullY - BORDER) / DOT_SPACING;
     const ix = Math.round(gx), iy = Math.round(gy);
@@ -335,13 +324,12 @@ html_code = r"""
     const dy = ev.clientY - pointerStart.y;
     if (!isDragging && Math.hypot(dx,dy) > DRAG_THRESHOLD) isDragging = true;
     if (isDragging){
-      // pan viewport (screen -> full-space)
       const fx = -dx * (viewport.w / canvas.width);
       const fy = -dy * (viewport.h / canvas.height);
       viewport.cx = Math.max(viewport.w/2, Math.min(fullWidth - viewport.w/2, pointerStart.cx + fx));
       viewport.cy = Math.max(viewport.h/2, Math.min(fullHeight - viewport.h/2, pointerStart.cy + fy));
       draw();
-      scheduleSaveState(300); // saving while panning but debounced
+      scheduleSaveState(300);
     }
   });
 
@@ -352,21 +340,19 @@ html_code = r"""
     const dx = ev.clientX - pointerStart.x;
     const dy = ev.clientY - pointerStart.y;
     if (!isDragging && Math.hypot(dx,dy) <= DRAG_THRESHOLD){
-      // treat as click -> toggle edge
       const rect = canvas.getBoundingClientRect();
       const sx = ev.clientX - rect.left;
       const sy = ev.clientY - rect.top;
       const full = screenToFull(sx, sy);
       const nearest = findNearestEdgeToFull(full.x, full.y);
       if (nearest && nearest.dist !== Infinity){
-        const distScreen = Math.sqrt(nearest.dist) * (viewport.w / canvas.width); // approximate mapping
-        // Use EDGE_HIT_RADIUS in screen pixels for click tolerance:
+        // map world distance to approx screen pixels: d_screen ≈ sqrt(dist) * (canvas.width / viewport.w)
+        const distScreen = Math.sqrt(nearest.dist) * (canvas.width / viewport.w);
         if (distScreen <= EDGE_HIT_RADIUS){
           const k = edgeKey(nearest.a, nearest.b);
           if (edges.has(k)) { removeEdge(nearest.a, nearest.b); }
           else { addEdge(nearest.a, nearest.b); }
           draw();
-          scheduleSaveState();
         }
       }
     }
@@ -374,32 +360,28 @@ html_code = r"""
     isDragging = false;
   });
 
-  // Load state from URL if present, else default: align top-left
+  // Initialize: resize, set top-left alignment, then try to restore state and write state to URL
   function initialize(){
     resizeCanvas();
-    // default top-left: ensure viewport cx,cy put top-left at puzzle origin
     viewport.w = canvas.width / zoom;
     viewport.h = canvas.height / zoom;
-    // top-left of puzzle (full-space) is at coordinate (0,0) + puzzle border offset BORDER,
-    // so set viewport so left/top = 0 + BORDER
-    viewport.cx = viewport.w/2; // left = viewport.cx - viewport.w/2 -> should equal 0 + BORDER
+    // top-left: set viewport so left/top align to puzzle left/top (including BORDER)
+    viewport.cx = viewport.w/2;
     viewport.cy = viewport.h/2;
-    // Attempt to restore
+
     const restored = tryRestoreFromURL();
     if (!restored) {
-      // nothing in URL: keep top-left alignment
-      // but clamp to full extents
       viewport.cx = Math.max(viewport.w/2, Math.min(fullWidth - viewport.w/2, viewport.cx));
       viewport.cy = Math.max(viewport.h/2, Math.min(fullHeight - viewport.h/2, viewport.cy));
     }
+    // write current state to URL so bookmarking immediately contains a state token
+    saveStateToURL();
     draw();
   }
 
   // Window resize handling
   window.addEventListener('resize', () => {
     resizeCanvas();
-    // after resize keep the same top-left alignment relative to puzzle if user hasn't moved;
-    // otherwise keep viewport center as-is but ensure within bounds.
     viewport.w = canvas.width / zoom;
     viewport.h = canvas.height / zoom;
     viewport.cx = Math.max(viewport.w/2, Math.min(fullWidth - viewport.w/2, viewport.cx || viewport.w/2));
@@ -407,15 +389,17 @@ html_code = r"""
     draw();
   });
 
-  // Keyboard helpers (zoom/pan)
+  // Keyboard helpers (zoom/pan) — update URL when change occurs
   window.addEventListener('keydown', (ev) => {
     const step = Math.max(10, 0.06 * Math.min(viewport.w, viewport.h));
-    if (ev.key === 'ArrowLeft') { viewport.cx = Math.max(viewport.w/2, viewport.cx - step); draw(); scheduleSaveState(); }
-    if (ev.key === 'ArrowRight'){ viewport.cx = Math.min(fullWidth - viewport.w/2, viewport.cx + step); draw(); scheduleSaveState(); }
-    if (ev.key === 'ArrowUp')   { viewport.cy = Math.max(viewport.h/2, viewport.cy - step); draw(); scheduleSaveState(); }
-    if (ev.key === 'ArrowDown') { viewport.cy = Math.min(fullHeight - viewport.h/2, viewport.cy + step); draw(); scheduleSaveState(); }
-    if (ev.key === '+' || ev.key === '=') { zoom = Math.min(8, zoom * 1.2); viewport.w = canvas.width/zoom; viewport.h = canvas.height/zoom; draw(); scheduleSaveState(); }
-    if (ev.key === '-' || ev.key === '_') { zoom = Math.max(0.6, zoom / 1.2); viewport.w = canvas.width/zoom; viewport.h = canvas.height/zoom; draw(); scheduleSaveState(); }
+    let changed = false;
+    if (ev.key === 'ArrowLeft') { viewport.cx = Math.max(viewport.w/2, viewport.cx - step); changed = true; }
+    if (ev.key === 'ArrowRight'){ viewport.cx = Math.min(fullWidth - viewport.w/2, viewport.cx + step); changed = true; }
+    if (ev.key === 'ArrowUp')   { viewport.cy = Math.max(viewport.h/2, viewport.cy - step); changed = true; }
+    if (ev.key === 'ArrowDown') { viewport.cy = Math.min(fullHeight - viewport.h/2, viewport.cy + step); changed = true; }
+    if (ev.key === '+' || ev.key === '=') { zoom = Math.min(8, zoom * 1.2); viewport.w = canvas.width/zoom; viewport.h = canvas.height/zoom; changed = true; }
+    if (ev.key === '-' || ev.key === '_') { zoom = Math.max(0.6, zoom / 1.2); viewport.w = canvas.width/zoom; viewport.h = canvas.height/zoom; changed = true; }
+    if (changed) { draw(); scheduleSaveState(); }
   });
 
   // initialize and draw
