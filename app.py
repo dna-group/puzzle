@@ -153,4 +153,57 @@ html_code = r"""
     for(let dx=-1;dx<=1;dx++){
       for(let dy=-1;dy<=1;dy++){
         const x=ix+dx,y=iy+dy;
-        if(x>=0&&x+1<CO
+        if(x>=0&&x+1<COLS&&y>=0&&y<ROWS){
+          const mx=BORDER+(x+0.5)*DOT_SPACING,my=BORDER+y*DOT_SPACING;
+          const d=(mx-fx)**2+(my-fy)**2;
+          if(d<best.d) best={d,a:{x,y},b:{x:x+1,y}};
+        }
+        if(x>=0&&x<COLS&&y>=0&&y+1<ROWS){
+          const mx=BORDER+x*DOT_SPACING,my=BORDER+(y+0.5)*DOT_SPACING;
+          const d=(mx-fx)**2+(my-fy)**2;
+          if(d<best.d) best={d,a:{x,y},b:{x,y:y+1}};
+        }
+      }
+    }
+    return best;
+  }
+
+  let down=false,start=null,drag=false;
+  canvas.onpointerdown=e=>{
+    down=true;drag=false;
+    start={x:e.clientX,y:e.clientY,cx:viewport.cx,cy:viewport.cy};
+  };
+  window.onpointermove=e=>{
+    if(!down)return;
+    const dx=e.clientX-start.x,dy=e.clientY-start.y;
+    if(Math.hypot(dx,dy)>6)drag=true;
+    if(drag){
+      viewport.cx=start.cx-dx*(viewport.w/canvas.width);
+      viewport.cy=start.cy-dy*(viewport.h/canvas.height);
+      draw();
+    }
+  };
+  canvas.onpointerup=e=>{
+    down=false;
+    if(!drag){
+      const r=canvas.getBoundingClientRect();
+      const f=screenToFull(e.clientX-r.left,e.clientY-r.top);
+      const n=nearestEdge(f.x,f.y);
+      if(Math.sqrt(n.d)*zoom<EDGE_HIT_RADIUS){
+        const k=edgeKey(n.a,n.b);
+        edges.has(k)?removeEdge(n.a,n.b):addEdge(n.a,n.b);
+        draw();
+      }
+    }
+  };
+
+  window.onresize=()=>{resize();draw();};
+  resize();
+  draw();
+})();
+</script>
+</body>
+</html>
+"""
+
+html(html_code, height=900)
