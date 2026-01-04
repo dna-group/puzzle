@@ -14,18 +14,18 @@ html_code = r"""
   html,body {
     height:100%;
     margin:0;
-    background:#000;
+    background:#fff;
   }
   #container {
     position:relative;
     height:100vh;
     width:100vw;
-    background:#000;
+    background:#fff;
     overflow:hidden;
   }
   canvas {
     display:block;
-    background:#000;
+    background:#fff;
     touch-action:none;
   }
 </style>
@@ -44,7 +44,7 @@ html_code = r"""
   const EDGE_HIT_RADIUS = 10;
   const INITIAL_ZOOM = 3.2;
 
-  // --- black border margin (prevents clipping) ---
+  // margin around grid so edges never clip
   const BORDER = DOT_SPACING * 2;
 
   const gridWidth  = (COLS - 1) * DOT_SPACING;
@@ -114,12 +114,12 @@ html_code = r"""
   }
 
   function draw(){
-    ctx.fillStyle="#000";
+    ctx.fillStyle="#fff";
     ctx.fillRect(0,0,canvas.width,canvas.height);
 
-    ctx.fillStyle="#fff";
+    // dots (black)
+    ctx.fillStyle="#000";
     const r = Math.max(0.6,DOT_RADIUS*zoom/2);
-
     for(let y=0;y<ROWS;y++){
       for(let x=0;x<COLS;x++){
         const fx = BORDER + x*DOT_SPACING;
@@ -131,7 +131,8 @@ html_code = r"""
       }
     }
 
-    ctx.strokeStyle="#fff";
+    // edges (grey)
+    ctx.strokeStyle="#888";
     ctx.lineWidth=Math.max(3,zoom*1.1);
     ctx.lineCap="round";
     ctx.beginPath();
