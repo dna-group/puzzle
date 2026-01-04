@@ -57,223 +57,230 @@ HTML_TEMPLATE = """
 
 <script>
 (function(){
-  var ROWS = __ROWS__;
-  var COLS = __COLS__;
-  var CELL = __CELL__;
-  var IMPORT_PAYLOAD = "__IMPORT__";
+  try {
+    console.log("slither iframe initializing");
+    var ROWS = __ROWS__;
+    var COLS = __COLS__;
+    var CELL = __CELL__;
+    var IMPORT_PAYLOAD = "__IMPORT__";
+    var margin = 8;
+    var xmlns = "http://www.w3.org/2000/svg";
+    var svgHolder = document.getElementById('svgHolder');
 
-  var margin = 8;
-  var xmlns = "http://www.w3.org/2000/svg";
-  var svgHolder = document.getElementById('svgHolder');
+    // set of "r,c,d" strings where d = 'h' or 'v'
+    var filled = new Set();
 
-  // set of "r,c,d" strings where d = 'h' or 'v'
-  var filled = new Set();
-
-  if (IMPORT_PAYLOAD && IMPORT_PAYLOAD.length>0) {
-    try {
-      var obj = JSON.parse(IMPORT_PAYLOAD);
-      if (obj && obj.filled_edges) {
-        for (var i=0;i<obj.filled_edges.length;i++) filled.add(obj.filled_edges[i]);
-      }
-    } catch(e){ console.warn("bad import", e); }
-  }
-
-  function edgeKey(r,c,d){ return r + "," + c + "," + d; }
-
-  function buildSVG(){
-    var width = COLS*CELL + margin*2;
-    var height = ROWS*CELL + margin*2;
-    var svg = document.createElementNS(xmlns, "svg");
-    svg.setAttribute("viewBox", "0 0 " + width + " " + height);
-    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
-    svg.style.width = "100%";
-    svg.style.height = "auto";
-    svg.id = "slitherSvg";
-
-    // background
-    var bg = document.createElementNS(xmlns, "rect");
-    bg.setAttribute("x",0); bg.setAttribute("y",0);
-    bg.setAttribute("width", width); bg.setAttribute("height", height);
-    bg.setAttribute("fill", "transparent");
-    svg.appendChild(bg);
-
-    // dots
-    var dotR = Math.max(3, Math.round(CELL*0.08));
-    for (var r=0;r<=ROWS;r++){
-      for (var c=0;c<=COLS;c++){
-        var dot = document.createElementNS(xmlns, "circle");
-        dot.setAttribute("cx", margin + c*CELL);
-        dot.setAttribute("cy", margin + r*CELL);
-        dot.setAttribute("r", dotR);
-        dot.setAttribute("fill", "#111");
-        svg.appendChild(dot);
-      }
+    if (IMPORT_PAYLOAD && IMPORT_PAYLOAD.length>0) {
+      try {
+        var obj = JSON.parse(IMPORT_PAYLOAD);
+        if (obj && obj.filled_edges) {
+          for (var i=0;i<obj.filled_edges.length;i++) filled.add(obj.filled_edges[i]);
+        }
+      } catch(e){ console.warn("bad import", e); }
     }
 
-    // horizontal hit-lines (invisible thick areas that respond to taps)
-    for (var r=0;r<=ROWS;r++){
-      for (var c=0;c<COLS;c++){
-        var x1 = margin + c*CELL, y = margin + r*CELL, x2 = x1 + CELL;
-        var g = document.createElementNS(xmlns, "g");
-        var key = edgeKey(r,c,'h');
-        g.setAttribute("data-edge", key);
-        // visible stroke (drawn when filled)
-        var vis = document.createElementNS(xmlns, "line");
-        vis.setAttribute("x1", x1); vis.setAttribute("y1", y);
-        vis.setAttribute("x2", x2); vis.setAttribute("y2", y);
-        vis.setAttribute("stroke-linecap", "round");
-        vis.setAttribute("stroke-width", 6);
-        vis.setAttribute("class", "vis");
-        // hit area
-        var hit = document.createElementNS(xmlns, "line");
-        hit.setAttribute("x1", x1); hit.setAttribute("y1", y);
-        hit.setAttribute("x2", x2); hit.setAttribute("y2", y);
-        hit.setAttribute("stroke-linecap", "round");
-        hit.setAttribute("stroke-width", CELL*0.6);
-        hit.setAttribute("stroke", "transparent");
-        hit.style.cursor = "pointer";
-        hit.addEventListener('pointerdown', onHitPointerDown);
-        hit.addEventListener('pointerup', onHitPointerUp);
-        g.appendChild(vis);
-        g.appendChild(hit);
-        svg.appendChild(g);
+    function edgeKey(r,c,d){ return r + "," + c + "," + d; }
+
+    function buildSVG(){
+      var width = COLS*CELL + margin*2;
+      var height = ROWS*CELL + margin*2;
+      var svg = document.createElementNS(xmlns, "svg");
+      svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+      svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      svg.style.width = "100%";
+      svg.style.height = "auto";
+      svg.id = "slitherSvg";
+
+      // background
+      var bg = document.createElementNS(xmlns, "rect");
+      bg.setAttribute("x",0); bg.setAttribute("y",0);
+      bg.setAttribute("width", width); bg.setAttribute("height", height);
+      bg.setAttribute("fill", "transparent");
+      svg.appendChild(bg);
+
+      // dots
+      var dotR = Math.max(3, Math.round(CELL*0.08));
+      for (var r=0;r<=ROWS;r++){
+        for (var c=0;c<=COLS;c++){
+          var dot = document.createElementNS(xmlns, "circle");
+          dot.setAttribute("cx", margin + c*CELL);
+          dot.setAttribute("cy", margin + r*CELL);
+          dot.setAttribute("r", dotR);
+          dot.setAttribute("fill", "#111");
+          svg.appendChild(dot);
+        }
       }
-    }
 
-    // vertical hit-lines
-    for (var r=0;r<ROWS;r++){
-      for (var c=0;c<=COLS;c++){
-        var x = margin + c*CELL, y1 = margin + r*CELL, y2 = y1 + CELL;
-        var g = document.createElementNS(xmlns, "g");
-        var key = edgeKey(r,c,'v');
-        g.setAttribute("data-edge", key);
-        var vis = document.createElementNS(xmlns, "line");
-        vis.setAttribute("x1", x); vis.setAttribute("y1", y1);
-        vis.setAttribute("x2", x); vis.setAttribute("y2", y2);
-        vis.setAttribute("stroke-linecap", "round");
-        vis.setAttribute("stroke-width", 6);
-        vis.setAttribute("class", "vis");
-        var hit = document.createElementNS(xmlns, "line");
-        hit.setAttribute("x1", x); hit.setAttribute("y1", y1);
-        hit.setAttribute("x2", x); hit.setAttribute("y2", y2);
-        hit.setAttribute("stroke-linecap", "round");
-        hit.setAttribute("stroke-width", CELL*0.6);
-        hit.setAttribute("stroke", "transparent");
-        hit.style.cursor = "pointer";
-        hit.addEventListener('pointerdown', onHitPointerDown);
-        hit.addEventListener('pointerup', onHitPointerUp);
-        g.appendChild(vis);
-        g.appendChild(hit);
-        svg.appendChild(g);
+      // horizontal hit-lines (invisible thick areas that respond to taps)
+      for (var r=0;r<=ROWS;r++){
+        for (var c=0;c<COLS;c++){
+          var x1 = margin + c*CELL, y = margin + r*CELL, x2 = x1 + CELL;
+          var g = document.createElementNS(xmlns, "g");
+          var key = edgeKey(r,c,'h');
+          g.setAttribute("data-edge", key);
+          // visible stroke (drawn when filled)
+          var vis = document.createElementNS(xmlns, "line");
+          vis.setAttribute("x1", x1); vis.setAttribute("y1", y);
+          vis.setAttribute("x2", x2); vis.setAttribute("y2", y);
+          vis.setAttribute("stroke-linecap", "round");
+          vis.setAttribute("stroke-width", 6);
+          vis.setAttribute("class", "vis");
+          // hit area
+          var hit = document.createElementNS(xmlns, "line");
+          hit.setAttribute("x1", x1); hit.setAttribute("y1", y);
+          hit.setAttribute("x2", x2); hit.setAttribute("y2", y);
+          hit.setAttribute("stroke-linecap", "round");
+          hit.setAttribute("stroke-width", CELL*0.6);
+          hit.setAttribute("stroke", "transparent");
+          hit.style.cursor = "pointer";
+          hit.addEventListener('pointerdown', onHitPointerDown);
+          hit.addEventListener('pointerup', onHitPointerUp);
+          g.appendChild(vis);
+          g.appendChild(hit);
+          svg.appendChild(g);
+        }
       }
+
+      // vertical hit-lines
+      for (var r=0;r<ROWS;r++){
+        for (var c=0;c<=COLS;c++){
+          var x = margin + c*CELL, y1 = margin + r*CELL, y2 = y1 + CELL;
+          var g = document.createElementNS(xmlns, "g");
+          var key = edgeKey(r,c,'v');
+          g.setAttribute("data-edge", key);
+          var vis = document.createElementNS(xmlns, "line");
+          vis.setAttribute("x1", x); vis.setAttribute("y1", y1);
+          vis.setAttribute("x2", x); vis.setAttribute("y2", y2);
+          vis.setAttribute("stroke-linecap", "round");
+          vis.setAttribute("stroke-width", 6);
+          vis.setAttribute("class", "vis");
+          var hit = document.createElementNS(xmlns, "line");
+          hit.setAttribute("x1", x); hit.setAttribute("y1", y1);
+          hit.setAttribute("x2", x); hit.setAttribute("y2", y2);
+          hit.setAttribute("stroke-linecap", "round");
+          hit.setAttribute("stroke-width", CELL*0.6);
+          hit.setAttribute("stroke", "transparent");
+          hit.style.cursor = "pointer";
+          hit.addEventListener('pointerdown', onHitPointerDown);
+          hit.addEventListener('pointerup', onHitPointerUp);
+          g.appendChild(vis);
+          g.appendChild(hit);
+          svg.appendChild(g);
+        }
+      }
+
+      updateVisuals(svg);
+      return svg;
     }
 
-    updateVisuals(svg);
-    return svg;
-  }
+    var pointerActive = false;
+    var pointerMode = null; // 'add' or 'remove'
 
-  var pointerActive = false;
-  var pointerMode = null; // 'add' or 'remove'
-
-  function onHitPointerDown(ev){
-    ev.preventDefault();
-    try{ ev.target.setPointerCapture(ev.pointerId); } catch(e){}
-    pointerActive = true;
-    var g = ev.target.closest('[data-edge]');
-    if (!g) return;
-    var key = g.getAttribute('data-edge');
-    // determine mode: if currently filled remove on drag, else add on drag
-    pointerMode = filled.has(key) ? 'remove' : 'add';
-    // immediate toggle on tap-down for responsiveness
-    toggleEdgeImmediate(key);
-  }
-
-  function onHitPointerUp(ev){
-    try{ ev.target.releasePointerCapture(ev.pointerId); } catch(e){}
-    pointerActive = false;
-    pointerMode = null;
-  }
-
-  // Drag support: when pointer moves over other hit areas while pressed
-  document.addEventListener('pointermove', function(ev){
-    if (!pointerActive) return;
-    if (!document.getElementById('dragMode').checked) return;
-    var el = document.elementFromPoint(ev.clientX, ev.clientY);
-    if (!el) return;
-    var g = el.closest && el.closest('[data-edge]');
-    if (!g) return;
-    var key = g.getAttribute('data-edge');
-    if (pointerMode === 'add'){
-      if (!filled.has(key)){ filled.add(key); updateVisuals(document.getElementById('slitherSvg')); }
-    } else if (pointerMode === 'remove'){
-      if (filled.has(key)){ filled.delete(key); updateVisuals(document.getElementById('slitherSvg')); }
+    function onHitPointerDown(ev){
+      ev.preventDefault();
+      try{ ev.target.setPointerCapture(ev.pointerId); } catch(e){}
+      pointerActive = true;
+      var g = ev.target.closest('[data-edge]');
+      if (!g) return;
+      var key = g.getAttribute('data-edge');
+      // determine mode: if currently filled remove on drag, else add on drag
+      pointerMode = filled.has(key) ? 'remove' : 'add';
+      // immediate toggle on tap-down for responsiveness
+      toggleEdgeImmediate(key);
     }
-  }, {passive:true});
 
-  function toggleEdgeImmediate(key){
-    if (filled.has(key)) filled.delete(key);
-    else filled.add(key);
-    updateVisuals(document.getElementById('slitherSvg'));
-  }
+    function onHitPointerUp(ev){
+      try{ ev.target.releasePointerCapture(ev.pointerId); } catch(e){}
+      pointerActive = false;
+      pointerMode = null;
+    }
 
-  function updateVisuals(svg){
-    if (!svg) return;
-    var groups = svg.querySelectorAll('[data-edge]');
-    groups.forEach(function(g){
-      var k = g.getAttribute('data-edge');
-      var vis = g.querySelector('.vis');
-      if (filled.has(k)){
-        vis.setAttribute('stroke', '#111');
-        vis.setAttribute('opacity', '1');
-      } else {
-        vis.setAttribute('stroke', 'transparent');
-        vis.setAttribute('opacity', '0');
+    // Drag support: when pointer moves over other hit areas while pressed
+    document.addEventListener('pointermove', function(ev){
+      if (!pointerActive) return;
+      if (!document.getElementById('dragMode').checked) return;
+      var el = document.elementFromPoint(ev.clientX, ev.clientY);
+      if (!el) return;
+      var g = el.closest && el.closest('[data-edge]');
+      if (!g) return;
+      var key = g.getAttribute('data-edge');
+      if (pointerMode === 'add'){
+        if (!filled.has(key)){ filled.add(key); updateVisuals(document.getElementById('slitherSvg')); }
+      } else if (pointerMode === 'remove'){
+        if (filled.has(key)){ filled.delete(key); updateVisuals(document.getElementById('slitherSvg')); }
+      }
+    }, {passive:true});
+
+    function toggleEdgeImmediate(key){
+      if (filled.has(key)) filled.delete(key);
+      else filled.add(key);
+      updateVisuals(document.getElementById('slitherSvg'));
+    }
+
+    function updateVisuals(svg){
+      if (!svg) return;
+      var groups = svg.querySelectorAll('[data-edge]');
+      groups.forEach(function(g){
+        var k = g.getAttribute('data-edge');
+        var vis = g.querySelector('.vis');
+        if (filled.has(k)){
+          vis.setAttribute('stroke', '#111');
+          vis.setAttribute('opacity', '1');
+        } else {
+          vis.setAttribute('stroke', 'transparent');
+          vis.setAttribute('opacity', '0');
+        }
+      });
+    }
+
+    // Buttons
+    document.addEventListener('click', function(ev){
+      var t = ev.target;
+      if (!t) return;
+      if (t.id === 'clearBtn'){
+        filled.clear();
+        updateVisuals(document.getElementById('slitherSvg'));
+      } else if (t.id === 'exportBtn'){
+        var payload = { rows: ROWS, cols: COLS, filled_edges: Array.from(filled) };
+        try { window.parent.postMessage({isStreamlitMessage:true, type:'component_value', value: payload}, '*'); }
+        catch(e){ console.warn(e); }
+        t.innerText = "Exported ✓";
+        setTimeout(function(){ t.innerText = "Export JSON"; }, 900);
+      } else if (t.id === 'importBtn'){
+        if (window._IMPORT_PAYLOAD){
+          try {
+            var obj = JSON.parse(window._IMPORT_PAYLOAD);
+            if (obj && obj.filled_edges){ filled.clear(); for (var i=0;i<obj.filled_edges.length;i++) filled.add(obj.filled_edges[i]); updateVisuals(document.getElementById('slitherSvg')); }
+          } catch(e){ console.warn(e); }
+        } else {
+          t.innerText = "No import data";
+          setTimeout(function(){ t.innerText = "Import state"; }, 900);
+        }
       }
     });
+
+    if (IMPORT_PAYLOAD && IMPORT_PAYLOAD.length>0){ try{ window._IMPORT_PAYLOAD = IMPORT_PAYLOAD; } catch(e){} }
+
+    // initial render
+    svgHolder.innerHTML = "";
+    svgHolder.appendChild(buildSVG());
+
+    // expose state getter for debugging / future use
+    window.getBoardState = function(){ return { rows: ROWS, cols: COLS, filled_edges: Array.from(filled) }; };
+
+    console.log("slither iframe ready");
+  } catch (err) {
+    console.error("slither iframe init error", err);
+    var holder = document.getElementById('svgHolder');
+    if (holder) { holder.innerHTML = "<div style='color:red;padding:12px'>Error initializing board — open console for details</div>"; }
   }
-
-  // Buttons
-  document.addEventListener('click', function(ev){
-    var t = ev.target;
-    if (!t) return;
-    if (t.id === 'clearBtn'){
-      filled.clear();
-      updateVisuals(document.getElementById('slitherSvg'));
-    } else if (t.id === 'exportBtn'){
-      var payload = { rows: ROWS, cols: COLS, filled_edges: Array.from(filled) };
-      try { window.parent.postMessage({isStreamlitMessage:true, type:'component_value', value: payload}, '*'); }
-      catch(e){ console.warn(e); }
-      t.innerText = "Exported ✓";
-      setTimeout(function(){ t.innerText = "Export JSON"; }, 900);
-    } else if (t.id === 'importBtn'){
-      if (window._IMPORT_PAYLOAD){
-        try {
-          var obj = JSON.parse(window._IMPORT_PAYLOAD);
-          if (obj && obj.filled_edges){ filled.clear(); for (var i=0;i<obj.filled_edges.length;i++) filled.add(obj.filled_edges[i]); updateVisuals(document.getElementById('slitherSvg')); }
-        } catch(e){ console.warn(e); }
-      } else {
-        t.innerText = "No import data";
-        setTimeout(function(){ t.innerText = "Import state"; }, 900);
-      }
-    }
-  });
-
-  if (IMPORT_PAYLOAD && IMPORT_PAYLOAD.length>0){ try{ window._IMPORT_PAYLOAD = IMPORT_PAYLOAD; } catch(e){} }
-
-  // initial render
-  svgHolder.innerHTML = "";
-  svgHolder.appendChild(buildSVG());
-
-  // expose state getter for debugging / future use
-  window.getBoardState = function(){ return { rows: ROWS, cols: COLS, filled_edges: Array.from(filled) }; };
-
 })();
 </script>
 </body>
 </html>
 """
 
-# prepare replacements
+# prepare replacements (safe)
 import_payload = st.session_state.get("_import_payload", "")
 html_code = (
     HTML_TEMPLATE
@@ -282,3 +289,16 @@ html_code = (
     .replace("__CELL__", str(cell_px))
     .replace("__IMPORT__", json.dumps(import_payload))
 )
+
+posted = html(html_code, height=iframe_height, scrolling=True)
+
+st.write("---")
+st.subheader("Exported state from iframe (click Export JSON in iframe)")
+if posted:
+    st.success("Received payload from iframe")
+    st.json(posted)
+    if st.button("Load this exported state into iframe"):
+        st.session_state["_import_payload"] = json.dumps(posted)
+        st.experimental_rerun()
+else:
+    st.info("No payload received yet. Click 'Export JSON' inside the board to send the state here.")
