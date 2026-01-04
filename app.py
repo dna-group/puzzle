@@ -4,12 +4,12 @@ from streamlit.components.v1 import html
 
 st.set_page_config(page_title="Slitherlink Canvas (circle-detect)", layout="wide")
 
-# Board parameters
-DOTS_X = 128
-DOTS_Y = 178
+# Board parameters — updated per request
+DOTS_X = 128           # number of dots horizontally
+DOTS_Y = 178           # number of dots vertically
 ROWS = DOTS_Y - 1
 COLS = DOTS_X - 1
-CELL_PX = 16
+CELL_PX = 16           # logical world units per cell (you can tweak)
 IFRAME_HEIGHT = 1200
 
 HTML = """
@@ -50,8 +50,8 @@ HTML = """
   let raf = null;
   const MOVE_THRESHOLD = 2;
 
-  // detection radius: diameter r/2 => radius = r/4
-  const DETECT_RADIUS_WORLD = CELL * 0.25;
+  // detection radius: diameter = d/2 was previous; now radius = d/3 per request
+  const DETECT_RADIUS_WORLD = CELL / 3.0;
 
   // helpers
   const edgeKey = (r,c,d) => `${r},${c},${d}`;
@@ -189,11 +189,10 @@ HTML = """
     const w = clientToWorld(ev.clientX, ev.clientY);
     const nearest = nearestEdgeToWorldWithDist(w.x, w.y);
     if(!nearest || !nearest.key) return;
-    // detection: circle radius = CELL/4
+    // detection: circle radius = CELL / 3 (as requested)
     if(nearest.dist <= DETECT_RADIUS_WORLD){
       if(nearest.key !== lastEdge){
         // first time entering this circle or switched to new edge
-        // if mode is null (didn't start on an edge), set mode now
         if(mode === null){
           mode = filled.has(nearest.key) ? 'remove' : 'add';
         }
@@ -220,7 +219,7 @@ HTML = """
     try{ ev.target.setPointerCapture(ev.pointerId); } catch(e){}
     active = true;
     lastEdge = null;
-    // decide initial mode if down occurs inside a detection circle
+    // decide initial mode if down occurs inside detection circle
     const w = clientToWorld(ev.clientX, ev.clientY);
     const nearest = nearestEdgeToWorldWithDist(w.x, w.y);
     if(nearest && nearest.key && nearest.dist <= DETECT_RADIUS_WORLD){
@@ -254,7 +253,7 @@ HTML = """
     if(!raf) raf = requestAnimationFrame(processMove);
   }
 
-  // zoom & pan (wheel & pinch) - unchanged
+  // zoom & pan (wheel & pinch)
   let lastPinchDist = null, lastPinchCenter = null;
   canvas.addEventListener('wheel', function(e){
     e.preventDefault();
@@ -305,7 +304,6 @@ HTML = """
     scale = Math.max(0.25, Math.min(6, fitScale));
     tx = (rect.width * dpr - viewW * scale * dpr) / 2;
     ty = (rect.height * dpr - viewH * scale * dpr) / 2;
-    const resizeObserver = () => resizeCanvas();
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
     canvas.addEventListener('pointerdown', onPointerDown);
