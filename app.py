@@ -2,11 +2,14 @@
 import streamlit as st
 from streamlit.components.v1 import html
 
-st.set_page_config(page_title="Slitherlink Board", layout="wide")
+st.set_page_config(page_title="Slitherlink Canvas", layout="wide")
 
-ROWS = 199
-COLS = 199
-CELL_PX = 16
+# Board parameters
+DOTS_X = 200  # number of dots horizontally (200)
+DOTS_Y = 200  # number of dots vertically (200)
+ROWS = DOTS_Y - 1
+COLS = DOTS_X - 1
+CELL_PX = 16   # base cell size in world units
 IFRAME_HEIGHT = 1200
 
 HTML = """
@@ -15,266 +18,459 @@ HTML = """
 <head>
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=4.0"/>
 <style>
-  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#fff}
-  #root{width:100%;height:100%}
-  svg{touch-action:none;display:block}
+  html,body{margin:0;padding:0;height:100%;background:#fff;overflow:hidden}
+  #root{width:100%;height:100vh;display:flex;align-items:stretch;justify-content:stretch}
+  canvas{display:block; width:100%; height:100%;}
+  /* disable selection/dragging */
+  body,canvas { -webkit-user-select: none; -ms-user-select: none; user-select: none; -webkit-touch-callout: none; }
 </style>
 </head>
 <body>
-<div id="root"></div>
+<div id="root"><canvas id="board"></canvas></div>
 
 <script>
 (function(){
-  const ROWS = __ROWS__, COLS = __COLS__, CELL = __CELL__, MARGIN = 6;
-  const SVG_NS = "http://www.w3.org/2000/svg";
-
-  // data
+  // ---------- CONFIG ----------
+  const ROWS = __ROWS__;
+  const COLS = __COLS__;
+  const CELL = __CELL__;   // world units (logical)
+  const MARGIN = 6;       // world margin
+  // ---------- STATE ----------
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  // edges stored as "r,c,d" where d in {'h','v'}
   const filled = new Set();
 
-  // cached layout
-  let viewBoxW = null, viewBoxH = null;
-  let rect = null, unitX = 1, unitY = 1;
+  // transform state (world -> screen): scale, translate
+  let scale = 1.0;
+  let tx = 0, ty = 0; // screen translation in pixels
+  // We'll work in "world" coordinates (same units as CELL), but map to canvas pixels with scale and DPR.
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
 
-  // pointer/drag state
+  // derived sizes
+  const viewW = COLS * CELL + MARGIN * 2;
+  const viewH = ROWS * CELL + MARGIN * 2;
+
+  // pointer / drag state
   let active = false;
-  let mode = null;         // 'add' or 'remove'
-  let anchorEdge = null;   // key string
-  let anchorClient = null; // {x,y}
-  let anchorView = null;   // {x,y} in view coords
-  let axis = null;         // 'h' or 'v'
-  let appliedSteps = 0;    // steps already applied from anchor
-  let rafReq = null;
+  let mode = null; // 'add'|'remove'
+  let anchorEdge = null; // string key
+  let anchorClient = null; // {x,y} in client pixels
+  let anchorWorld = null; // {x,y} in world coords
+  let axis = null; // 'h'|'v' current dominant axis
+  let appliedSteps = 0;
   let lastMoveEvent = null;
-  const MOVE_THRESHOLD = 4; // pixels
+  let raf = null;
+  const MOVE_THRESHOLD = 4; // client pixels
 
-  // helpers
+  // pinch state
+  let lastPinchDist = null;
+  let lastPinchCenter = null;
+
+  // helpers: edge key / parse
   const edgeKey = (r,c,d) => `${r},${c},${d}`;
-  function parseKey(k){ const p=k.split(','); return {r:+p[0],c:+p[1],d:p[2]}; }
-  function endpointsOf(k){ const {r,c,d}=parseKey(k); return d==='h'? [{r,c},{r,c:c+1}] : [{r,c},{r:r+1,c}]; }
+  function parseKey(k){ const p = k.split(','); return {r: +p[0], c: +p[1], d: p[2]}; }
+
+  // vertex/degree helpers (work on the Set)
+  function endpointsOf(key){
+    const p = parseKey(key);
+    if(p.d === 'h') return [{r:p.r, c:p.c}, {r:p.r, c:p.c+1}];
+    return [{r:p.r, c:p.c}, {r:p.r+1, c:p.c}];
+  }
   function vertexDegree(v){
-    let deg=0;
-    if(v.c-1>=0 && filled.has(edgeKey(v.r,v.c-1,'h'))) deg++;
-    if(v.c<=COLS-1 && filled.has(edgeKey(v.r,v.c,'h'))) deg++;
-    if(v.r-1>=0 && filled.has(edgeKey(v.r-1,v.c,'v'))) deg++;
-    if(v.r<=ROWS-1 && filled.has(edgeKey(v.r,v.c,'v'))) deg++;
+    let deg = 0;
+    if(v.c-1 >= 0 && filled.has(edgeKey(v.r, v.c-1, 'h'))) deg++;
+    if(v.c <= COLS-1 && filled.has(edgeKey(v.r, v.c, 'h'))) deg++;
+    if(v.r-1 >= 0 && filled.has(edgeKey(v.r-1, v.c, 'v'))) deg++;
+    if(v.r <= ROWS-1 && filled.has(edgeKey(v.r, v.c, 'v'))) deg++;
     return deg;
   }
-  function wouldExceedIfAdd(k){
-    if(filled.has(k)) return false;
-    for(const v of endpointsOf(k)) if(vertexDegree(v)>=2) return true;
+  function wouldExceedIfAdd(key){
+    if(filled.has(key)) return false;
+    for(const v of endpointsOf(key)) if(vertexDegree(v) >= 2) return true;
     return false;
   }
 
-  // build svg
-  const width = COLS*CELL + MARGIN*2, height = ROWS*CELL + MARGIN*2;
-  viewBoxW = width; viewBoxH = height;
-
-  const svg = document.createElementNS(SVG_NS,'svg');
-  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-  svg.setAttribute('preserveAspectRatio','xMidYMid meet');
-  svg.style.width='100%'; svg.style.height='auto';
-  document.getElementById('root').appendChild(svg);
-
-  // background + dots
-  const bg = document.createElementNS(SVG_NS,'rect');
-  bg.setAttribute('x',0); bg.setAttribute('y',0); bg.setAttribute('width',width); bg.setAttribute('height',height);
-  bg.setAttribute('fill','transparent'); svg.appendChild(bg);
-  const dotR = 2;
-  for(let r=0;r<=ROWS;r++){ for(let c=0;c<=COLS;c++){
-    const dot = document.createElementNS(SVG_NS,'circle');
-    dot.setAttribute('cx', MARGIN + c*CELL); dot.setAttribute('cy', MARGIN + r*CELL);
-    dot.setAttribute('r', dotR); dot.setAttribute('fill','#000'); svg.appendChild(dot);
-  }}
-
-  // create edges groups (vis + hit) — lightweight
-  function createEdge(x1,y1,x2,y2,key){
-    const g = document.createElementNS(SVG_NS,'g'); g.dataset.edge = key;
-    const vis = document.createElementNS(SVG_NS,'line'); vis.setAttribute('x1',x1); vis.setAttribute('y1',y1);
-    vis.setAttribute('x2',x2); vis.setAttribute('y2',y2); vis.setAttribute('stroke-width',3);
-    vis.setAttribute('stroke-linecap','round'); vis.classList.add('vis'); vis.setAttribute('stroke','transparent');
-    const hit = document.createElementNS(SVG_NS,'line'); hit.setAttribute('x1',x1); hit.setAttribute('y1',y1);
-    hit.setAttribute('x2',x2); hit.setAttribute('y2',y2); hit.setAttribute('stroke-width', CELL*0.6);
-    hit.setAttribute('stroke','transparent'); hit.style.cursor='pointer';
-    hit.addEventListener('pointerdown', onPointerDown);
-    hit.addEventListener('pointerup', onPointerUp);
-    g.appendChild(vis); g.appendChild(hit); svg.appendChild(g);
+  // coordinate transforms: client <-> world
+  function clientToCanvas(clientX, clientY){
+    const rect = canvas.getBoundingClientRect();
+    return { x: (clientX - rect.left) * dpr, y: (clientY - rect.top) * dpr, rect };
+  }
+  function clientToWorld(clientX, clientY){
+    const c = clientToCanvas(clientX, clientY);
+    // canvas pixels -> world units
+    const sx = (c.x - tx) / (scale * dpr);
+    const sy = (c.y - ty) / (scale * dpr);
+    return { x: sx, y: sy };
+  }
+  function worldToCanvasWX(wx, wy){
+    const cx = (wx * scale * dpr) + tx;
+    const cy = (wy * scale * dpr) + ty;
+    return { x: cx, y: cy };
   }
 
-  for(let r=0;r<=ROWS;r++){ for(let c=0;c<COLS;c++){
-    const x1 = MARGIN + c*CELL, y = MARGIN + r*CELL; createEdge(x1,y,x1+CELL,y, edgeKey(r,c,'h'));
-  }}
-  for(let r=0;r<ROWS;r++){ for(let c=0;c<=COLS;c++){
-    const x = MARGIN + c*CELL, y1 = MARGIN + r*CELL; createEdge(x,y1,x,y1+CELL, edgeKey(r,c,'v'));
-  }}
+  // nearest edge to a world point (same logic as SVG versions)
+  function nearestEdgeToWorld(wx, wy){
+    // horizontal candidate
+    const r_h = Math.round((wy - MARGIN) / CELL);
+    const c_h = Math.floor((wx - MARGIN) / CELL);
+    let dist_h = Infinity, key_h = null;
+    if(r_h >= 0 && r_h <= ROWS && c_h >= 0 && c_h < COLS){
+      const hx = MARGIN + (c_h + 0.5) * CELL;
+      const hy = MARGIN + r_h * CELL;
+      dist_h = Math.hypot(wx - hx, wy - hy);
+      key_h = edgeKey(r_h, c_h, 'h');
+    }
+    // vertical
+    const c_v = Math.round((wx - MARGIN) / CELL);
+    const r_v = Math.floor((wy - MARGIN) / CELL);
+    let dist_v = Infinity, key_v = null;
+    if(c_v >= 0 && c_v <= COLS && r_v >= 0 && r_v < ROWS){
+      const vx = MARGIN + c_v * CELL;
+      const vy = MARGIN + (r_v + 0.5) * CELL;
+      dist_v = Math.hypot(wx - vx, wy - vy);
+      key_v = edgeKey(r_v, c_v, 'v');
+    }
+    return (dist_h <= dist_v) ? key_h : key_v;
+  }
 
-  function updateVisuals(){
-    svg.querySelectorAll('[data-edge]').forEach(g=>{
-      const k = g.dataset.edge; const vis = g.querySelector('.vis');
-      vis.setAttribute('stroke', filled.has(k) ? '#000' : 'transparent');
+  // rendering (draw full board each frame)
+  function resizeCanvas(){
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    // keep scale/tx/ty when resizing; no further action needed
+    draw();
+  }
+
+  function clearCanvas(){
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+  }
+
+  function draw(){
+    clearCanvas();
+    ctx.save();
+    // world->canvas: scale and translate already in tx/ty
+    ctx.translate(tx, ty);
+    ctx.scale(scale * dpr, scale * dpr);
+
+    // draw dots
+    const dotR = 0.12 * Math.max(1, CELL / 16); // small world radius
+    ctx.fillStyle = '#000';
+    for(let r=0;r<=ROWS;r++){
+      const wy = MARGIN + r*CELL;
+      for(let c=0;c<=COLS;c++){
+        const wx = MARGIN + c*CELL;
+        ctx.beginPath();
+        ctx.arc(wx, wy, dotR, 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
+
+    // draw filled edges
+    ctx.lineCap = 'round';
+    ctx.lineWidth = Math.max(2, 0.18 * CELL);
+    ctx.strokeStyle = '#000';
+    // iterate filled set; it's efficient even for many edges on canvas
+    filled.forEach(k=>{
+      const p = parseKey(k);
+      if(p.d === 'h'){
+        const x1 = MARGIN + p.c * CELL, y = MARGIN + p.r * CELL;
+        const x2 = x1 + CELL;
+        ctx.beginPath();
+        ctx.moveTo(x1, y);
+        ctx.lineTo(x2, y);
+        ctx.stroke();
+      } else {
+        const x = MARGIN + p.c * CELL, y1 = MARGIN + p.r * CELL;
+        const y2 = y1 + CELL;
+        ctx.beginPath();
+        ctx.moveTo(x, y1);
+        ctx.lineTo(x, y2);
+        ctx.stroke();
+      }
     });
+
+    ctx.restore();
   }
 
-  // layout cache
-  function refreshLayoutCache(){
-    rect = svg.getBoundingClientRect();
-    unitX = viewBoxW / rect.width; unitY = viewBoxH / rect.height;
-  }
-  window.addEventListener('resize', ()=>{ if(svg) refreshLayoutCache(); });
-
-  // map client->view coords (fast)
-  function clientToView(cx,cy){
-    return { x: (cx - rect.left) * unitX, y: (cy - rect.top) * unitY };
-  }
-
-  // nearest edge pick (cheap arithmetic)
-  function nearestEdgeForClient(cx,cy){
-    const v = clientToView(cx,cy);
-    const sx = v.x, sy = v.y;
-    const r_h = Math.round((sy - MARGIN) / CELL);
-    const c_h = Math.floor((sx - MARGIN) / CELL);
-    let dh = Infinity, kh = null;
-    if(r_h>=0 && r_h<=ROWS && c_h>=0 && c_h<COLS){
-      const hx = MARGIN + (c_h + 0.5)*CELL, hy = MARGIN + r_h*CELL;
-      dh = Math.hypot(sx-hx, sy-hy); kh = edgeKey(r_h,c_h,'h');
+  // flash feedback for blocked adds (draw red line quickly on top)
+  function flashBlocked(key){
+    const p = parseKey(key);
+    ctx.save();
+    ctx.translate(tx, ty);
+    ctx.scale(scale * dpr, scale * dpr);
+    ctx.strokeStyle = '#d00';
+    ctx.lineWidth = Math.max(2, 0.18 * CELL);
+    ctx.lineCap = 'round';
+    if(p.d === 'h'){
+      const x1 = MARGIN + p.c * CELL, y = MARGIN + p.r * CELL;
+      ctx.beginPath(); ctx.moveTo(x1,y); ctx.lineTo(x1 + CELL, y); ctx.stroke();
+    } else {
+      const x = MARGIN + p.c * CELL, y1 = MARGIN + p.r * CELL;
+      ctx.beginPath(); ctx.moveTo(x,y1); ctx.lineTo(x, y1 + CELL); ctx.stroke();
     }
-    const c_v = Math.round((sx - MARGIN) / CELL);
-    const r_v = Math.floor((sy - MARGIN) / CELL);
-    let dv = Infinity, kv = null;
-    if(c_v>=0 && c_v<=COLS && r_v>=0 && r_v<ROWS){
-      const vx = MARGIN + c_v*CELL, vy = MARGIN + (r_v + 0.5)*CELL;
-      dv = Math.hypot(sx-vx, sy-vy); kv = edgeKey(r_v,c_v,'v');
-    }
-    return dh <= dv ? kh : kv;
+    ctx.restore();
+    // redraw after small delay to remove red flash
+    setTimeout(draw, 180);
   }
 
-  // pointer handlers — minimal work on pointerdown
-  function onPointerDown(ev){
-    ev.preventDefault();
-    try{ ev.target.setPointerCapture(ev.pointerId); }catch(e){}
-    refreshLayoutCache();
-    active = true; lastMoveEvent = null;
-    anchorClient = {x: ev.clientX, y: ev.clientY};
-    anchorEdge = nearestEdgeForClient(ev.clientX, ev.clientY);
-    anchorView = clientToView(anchorClient.x, anchorClient.y);
-    appliedSteps = 0; axis = null;
-    mode = filled.has(anchorEdge) ? 'remove' : 'add';
-    // immediate action
-    if(mode === 'add'){
-      if(!wouldExceed(anchorEdge)){ filled.add(anchorEdge); } else flash(anchorEdge);
-    } else { filled.delete(anchorEdge); }
-    updateVisuals();
-  }
-
-  function onPointerUp(ev){
-    try{ ev.target.releasePointerCapture(ev.pointerId); }catch(e){}
-    active = false; mode = null; anchorEdge = null; anchorClient = null; axis = null; appliedSteps = 0;
-    if(rafReq){ cancelAnimationFrame(rafReq); rafReq = null; }
-  }
-
-  // degree check uses same helpers
-  function endpointsOfKey(k){ const p=k.split(','); const r=+p[0], c=+p[1], d=p[2]; return d==='h'? [{r,c},{r,c:c+1}]: [{r,c},{r:r+1,c}]; }
-  function vertexDeg(v){
-    let d=0; if(v.c-1>=0 && filled.has(edgeKey(v.r,v.c-1,'h'))) d++; if(v.c<=COLS-1 && filled.has(edgeKey(v.r,v.c,'h'))) d++;
-    if(v.r-1>=0 && filled.has(edgeKey(v.r-1,v.c,'v'))) d++; if(v.r<=ROWS-1 && filled.has(edgeKey(v.r,v.c,'v'))) d++; return d;
-  }
-  function wouldExceed(k){ if(filled.has(k)) return false; for(const v of endpointsOfKey(k)) if(vertexDeg(v)>=2) return true; return false; }
-  function flash(k){ const g = svg.querySelector(`[data-edge="${k}"]`); if(!g) return; const vis=g.querySelector('.vis'); vis.setAttribute('stroke','#d00'); setTimeout(()=>vis.setAttribute('stroke', filled.has(k)?'#000':'transparent'),160); }
-
-  // throttled move handler via rAF
-  svg.addEventListener('pointermove', function(ev){
-    if(!active) return;
+  // PROCESS MOVES (throttled by rAF)
+  function scheduleMoveProcessing(ev){
     lastMoveEvent = ev;
-    if(!rafReq) rafReq = requestAnimationFrame(processMove);
-  }, {passive:true});
+    if(!raf) raf = requestAnimationFrame(processMove);
+  }
 
   function processMove(){
-    rafReq = null;
+    raf = null;
     const ev = lastMoveEvent;
-    if(!ev || !active || !anchorClient) return;
-    const dx = ev.clientX - anchorClient.x, dy = ev.clientY - anchorClient.y;
-    const dist = Math.hypot(dx,dy);
-    if(dist < MOVE_THRESHOLD) return;
-
-    // determine dominant axis dynamically
-    const newAxis = Math.abs(dx) >= Math.abs(dy) ? 'h' : 'v';
-    if(axis !== newAxis){
-      // re-anchor on axis switch: set anchor to current pointer
+    if(!active || !anchorClient || !anchorWorld) return;
+    // compute movement in client pixels relative to anchorClient
+    const dxClient = ev.clientX - anchorClient.x;
+    const dyClient = ev.clientY - anchorClient.y;
+    const distClient = Math.hypot(dxClient, dyClient);
+    if(distClient < MOVE_THRESHOLD) return;
+    // determine dominant axis based on current move vector
+    const currentAxis = Math.abs(dxClient) >= Math.abs(dyClient) ? 'h' : 'v';
+    if(axis !== currentAxis){
+      // switch axis: re-anchor to current pointer
       anchorClient = {x: ev.clientX, y: ev.clientY};
-      anchorView = clientToView(anchorClient.x, anchorClient.y);
-      axis = newAxis; appliedSteps = 0;
-      // update anchorEdge based on nearest edge at the new anchor
-      anchorEdge = nearestEdgeForClient(anchorClient.x, anchorClient.y);
+      anchorWorld = clientToWorld(ev.clientX, ev.clientY);
+      anchorEdge = nearestEdgeToWorld(anchorWorld.x, anchorWorld.y);
+      axis = currentAxis;
+      appliedSteps = 0;
       mode = filled.has(anchorEdge) ? 'remove' : 'add';
+      // do not perform step on axis-change frame; wait for movement from new anchor
       return;
     }
-
-    // compute moved units along axis in view coordinates
-    const movedUnits = axis === 'h' ? (ev.clientX - anchorClient.x) * unitX : (ev.clientY - anchorClient.y) * unitY;
+    // compute movement along axis in world units
+    const rect = canvas.getBoundingClientRect();
+    const unitX = viewBoxW / rect.width;
+    const unitY = viewBoxH / rect.height;
+    let movedUnits = (axis === 'h') ? dxClient * unitX : dyClient * unitY;
     const sign = movedUnits >= 0 ? 1 : -1;
     const stepsNow = Math.floor(Math.abs(movedUnits) / CELL);
     if(stepsNow <= appliedSteps) return;
     const newSteps = stepsNow - appliedSteps;
 
     const base = parseKey(anchorEdge);
-    // for mapping when base.d != axis, pick anchor index based on anchorView (as earlier)
-    const anchorV = anchorView;
+    // choose anchor view (world coords) used when changing orientation mapping
+    const anchorV = anchorWorld;
 
     for(let s=1; s<=newSteps; s++){
       let keyToAct = null;
       const stepIndex = appliedSteps + s;
       if(base.d === axis){
         if(axis === 'h'){
-          const nc = base.c + sign*stepIndex; if(nc<0||nc>=COLS) break; keyToAct = edgeKey(base.r,nc,'h');
+          const nc = base.c + sign * stepIndex;
+          if(nc < 0 || nc >= COLS) break;
+          keyToAct = edgeKey(base.r, nc, 'h');
         } else {
-          const nr = base.r + sign*stepIndex; if(nr<0||nr>=ROWS) break; keyToAct = edgeKey(nr,base.c,'v');
+          const nr = base.r + sign * stepIndex;
+          if(nr < 0 || nr >= ROWS) break;
+          keyToAct = edgeKey(nr, base.c, 'v');
         }
       } else {
         if(base.d === 'h' && axis === 'v'){
-          const col = anchorV.x <= (MARGIN + (base.c+0.5)*CELL) ? base.c : base.c+1;
-          const nr = base.r + sign*stepIndex; if(nr<0||nr>=ROWS||col<0||col>COLS) break; keyToAct = edgeKey(nr,col,'v');
+          // choose column base.c or base.c+1 using anchorWorld.x
+          const midX = MARGIN + (base.c + 0.5) * CELL;
+          const col = (anchorV.x <= midX) ? base.c : base.c + 1;
+          const nr = base.r + sign * stepIndex;
+          if(nr < 0 || nr >= ROWS || col < 0 || col > COLS) break;
+          keyToAct = edgeKey(nr, col, 'v');
         } else if(base.d === 'v' && axis === 'h'){
-          const row = anchorV.y <= (MARGIN + (base.r+0.5)*CELL) ? base.r : base.r+1;
-          const nc = base.c + sign*stepIndex; if(nc<0||nc>=COLS||row<0||row>ROWS) break; keyToAct = edgeKey(row,nc,'h');
+          const midY = MARGIN + (base.r + 0.5) * CELL;
+          const row = (anchorV.y <= midY) ? base.r : base.r + 1;
+          const nc = base.c + sign * stepIndex;
+          if(nc < 0 || nc >= COLS || row < 0 || row > ROWS) break;
+          keyToAct = edgeKey(row, nc, 'h');
         }
       }
 
       if(!keyToAct) continue;
       if(mode === 'add'){
         if(!filled.has(keyToAct)){
-          if(!wouldExceed(keyToAct)) filled.add(keyToAct); else flash(keyToAct);
+          if(!wouldExceedIfAdd(keyToAct)){
+            filled.add(keyToAct);
+          } else {
+            flashBlocked(keyToAct);
+          }
         }
       } else {
-        if(filled.has(keyToAct)) filled.delete(keyToAct);
+        if(filled.has(keyToAct)){
+          filled.delete(keyToAct);
+        }
       }
     }
 
     appliedSteps = stepsNow;
-    updateVisuals();
+    draw();
   }
 
-  // double-tap / pinch unchanged
-  let lastTap=0, lastDist=null;
-  document.addEventListener('touchend', function(){
-    const now=Date.now(); if(now-lastTap<300){ const cur = svg.style.transform?parseFloat(svg.style.transform.replace('scale(','')):1; svg.style.transformOrigin='0 0'; svg.style.transform=`scale(${cur===1?2:1})`; } lastTap=now;
-  }, {passive:true});
-  document.addEventListener('touchmove', function(e){ if(e.touches && e.touches.length===2){ e.preventDefault(); const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY); if(lastDist){ const cur=svg.style.transform?parseFloat(svg.style.transform.replace('scale(','')):1; const next=Math.max(0.5, Math.min(4, cur*(d/lastDist))); svg.style.transformOrigin='0 0'; svg.style.transform=`scale(${next})`; } lastDist=d;} }, {passive:false});
-  document.addEventListener('touchend', function(){ lastDist=null; }, {passive:true});
+  // pointer handlers (mouse / touch unified)
+  function onPointerDown(ev){
+    ev.preventDefault();
+    active = true;
+    // single-touch pan/zoom handled elsewhere for pinch; for pointerdown, set captures
+    try{ ev.target.setPointerCapture(ev.pointerId); } catch(e){}
+    anchorClient = { x: ev.clientX, y: ev.clientY };
+    anchorWorld = clientToWorld(ev.clientX, ev.clientY);
+    anchorEdge = nearestEdgeToWorld(anchorWorld.x, anchorWorld.y);
+    mode = filled.has(anchorEdge) ? 'remove' : 'add';
+    // immediate attempt
+    if(mode === 'add'){
+      if(!wouldExceedIfAdd(anchorEdge)){
+        filled.add(anchorEdge);
+      } else {
+        flashBlocked(anchorEdge);
+      }
+    } else {
+      filled.delete(anchorEdge);
+    }
+    axis = null;
+    appliedSteps = 0;
+    draw();
+  }
 
-  // initial cache
-  refreshLayoutCache();
-  updateVisuals();
-  console.log('Responsive slither ready');
+  function onPointerUp(ev){
+    try{ ev.target.releasePointerCapture(ev.pointerId);} catch(e){}
+    active = false;
+    anchorClient = null; anchorWorld = null; anchorEdge = null;
+    axis = null; appliedSteps = 0;
+    if(raf){ cancelAnimationFrame(raf); raf = null; lastMoveEvent = null; }
+  }
+
+  function onPointerMove(ev){
+    if(!active) return;
+    lastMoveEvent = ev;
+    if(!raf) raf = requestAnimationFrame(processMove);
+  }
+
+  // double-tap zoom and pinch-to-zoom + two-finger pan
+  let lastTapTime = 0;
+  canvas.addEventListener('touchend', function(e){
+    const now = Date.now();
+    if(now - lastTapTime < 300 && e.touches.length === 0){
+      // double-tap: toggle scale 1 <-> 2 centered on last touch
+      const last = e.changedTouches[0];
+      const wpos = clientToWorld(last.clientX, last.clientY);
+      toggleZoomAt(wpos.x, wpos.y);
+    }
+    lastTapTime = now;
+  }, {passive:true});
+
+  // pinch & two-finger pan handling
+  canvas.addEventListener('touchmove', function(e){
+    if(e.touches && e.touches.length === 2){
+      e.preventDefault();
+      const t0 = e.touches[0], t1 = e.touches[1];
+      const cx = (t0.clientX + t1.clientX)/2, cy = (t0.clientY + t1.clientY)/2;
+      const dist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+      if(lastPinchDist == null){
+        lastPinchDist = dist;
+        lastPinchCenter = { x: cx, y: cy };
+        return;
+      }
+      // pinch scale factor
+      const factor = dist / lastPinchDist;
+      // zoom about pinch center
+      const before = clientToWorld(lastPinchCenter.x, lastPinchCenter.y);
+      scale *= factor;
+      clampScale();
+      // after zoom, need to keep the same world point under the same screen pixel,
+      // so adjust tx/ty accordingly
+      const after = clientToWorld(lastPinchCenter.x, lastPinchCenter.y);
+      tx += (after.x - before.x) * scale * dpr;
+      ty += (after.y - before.y) * scale * dpr;
+      lastPinchDist = dist;
+      lastPinchCenter = { x: cx, y: cy };
+      draw();
+    }
+  }, {passive:false});
+
+  canvas.addEventListener('touchend', function(e){
+    if(e.touches && e.touches.length < 2){
+      lastPinchDist = null; lastPinchCenter = null;
+    }
+  }, {passive:true});
+
+  // wheel zoom (desktop)
+  canvas.addEventListener('wheel', function(e){
+    e.preventDefault();
+    const delta = -e.deltaY;
+    const zoomFactor = delta > 0 ? 1.08 : 0.925;
+    const clientX = e.clientX, clientY = e.clientY;
+    const before = clientToWorld(clientX, clientY);
+    scale *= zoomFactor;
+    clampScale();
+    const after = clientToWorld(clientX, clientY);
+    tx += (after.x - before.x) * scale * dpr;
+    ty += (after.y - before.y) * scale * dpr;
+    draw();
+  }, {passive:false});
+
+  function clampScale(){
+    scale = Math.max(0.25, Math.min(6, scale));
+  }
+
+  function toggleZoomAt(wx, wy){
+    // toggle between 1 and 2 centered on world coords (wx, wy)
+    const canvasRect = canvas.getBoundingClientRect();
+    const centerClientX = canvasRect.left + canvasRect.width/2;
+    const centerClientY = canvasRect.top + canvasRect.height/2;
+    if(Math.abs(scale - 1) < 0.01){
+      // zoom to 2x centered at world point
+      const before = clientToWorld(centerClientX, centerClientY);
+      scale = 2;
+      const after = clientToWorld(centerClientX, centerClientY);
+      tx += (after.x - before.x) * scale * dpr;
+      ty += (after.y - before.y) * scale * dpr;
+    } else {
+      // reset
+      scale = 1;
+      tx = 0; ty = 0;
+    }
+    clampScale();
+    draw();
+  }
+
+  // initial canvas size and event hookups
+  function init(){
+    // center board initially: set tx/ty so board world (0,0) maps with margin to top-left quarter
+    const rect = canvas.getBoundingClientRect();
+    // center world onto canvas center
+    tx = (rect.width * dpr - viewBoxW * scale * dpr) / 2;
+    ty = (rect.height * dpr - viewBoxH * scale * dpr) / 2;
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointercancel', onPointerUp);
+    canvas.addEventListener('pointermove', onPointerMove);
+    // prevent context menu on right click
+    canvas.addEventListener('contextmenu', e => e.preventDefault());
+    draw();
+  }
+
+  // small blocked flash wrapper
+  function flashBlocked(key){
+    flashBlockedLocal(key);
+  }
+  function flashBlockedLocal(key){
+    // draw red then restore
+    flashBlocked(key);
+  }
+
+  // start
+  init();
+
 })();
 </script>
 </body>
 </html>
 """
 
-html(
-    HTML
-    .replace("__ROWS__", str(ROWS))
-    .replace("__COLS__", str(COLS))
-    .replace("__CELL__", str(CELL_PX)),
-    height=IFRAME_HEIGHT,
-    scrolling=True
-)
+# replace placeholders and render
+html_code = HTML.replace("__ROWS__", str(ROWS)).replace("__COLS__", str(COLS)).replace("__CELL__", str(CELL_PX))
+html(html_code, height=IFRAME_HEIGHT, scrolling=True)
