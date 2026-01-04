@@ -5,8 +5,8 @@ from streamlit.components.v1 import html
 st.set_page_config(page_title="Slitherlink Canvas (circle-detect)", layout="wide")
 
 # Board parameters
-DOTS_X = 200
-DOTS_Y = 200
+DOTS_X = 128
+DOTS_Y = 178
 ROWS = DOTS_Y - 1
 COLS = DOTS_X - 1
 CELL_PX = 16
