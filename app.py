@@ -275,4 +275,10 @@ HTML_TEMPLATE = """
 
 # prepare replacements
 import_payload = st.session_state.get("_import_payload", "")
-html_code = HTML_TEMPLATE.replace("__ROWS__", str(rows)).replace("__COLS__", str(cols)).replace("__CELL__", str(cell_px)).r_
+html_code = (
+    HTML_TEMPLATE
+    .replace("__ROWS__", str(rows))
+    .replace("__COLS__", str(cols))
+    .replace("__CELL__", str(cell_px))
+    .replace("__IMPORT__", json.dumps(import_payload))
+)
